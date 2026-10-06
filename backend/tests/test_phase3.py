@@ -126,6 +126,31 @@ class TestActionsCollection(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertEqual(mock_get.await_count, 1)
 class TestPhase3ApiContract(unittest.TestCase):
+    def test_public_repository_identity_returns_stable_id_as_string(self):
+        from app import app
+        repo = {
+            "id": 9876543210123456,
+            "private": False,
+            "name": "repo",
+            "owner": {"login": "alice"},
+            "html_url": "https://github.com/alice/repo",
+        }
+        with patch("app.get_repository", return_value=repo):
+            response = app.test_client().get(
+                "/api/github/repository/alice/repo/identity"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["provider_repo_id"], "9876543210123456")
+
+    def test_private_repository_identity_is_not_exposed(self):
+        from app import app
+        with patch("app.get_repository", return_value={"id": 1, "private": True}):
+            response = app.test_client().get(
+                "/api/github/repository/alice/private/identity"
+            )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json(), {"error": "Repository not found"})
+
     def test_public_repository_analytics_cache_is_served_after_visibility_check(self):
         from app import app
         import cache as app_cache

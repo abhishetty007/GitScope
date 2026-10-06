@@ -12,6 +12,8 @@ node_modules
 dist
 dist-ssr
 *.local
+.npm-cache/
+src/generated/prisma/
 
 # Editor directories and files
 .vscode/*

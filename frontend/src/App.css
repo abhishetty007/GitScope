@@ -528,3 +528,122 @@ button {
   line-height: 1.4;
   font-size: 13px;
 }
+
+.header-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+}
+
+.header-links a,
+.account-page a {
+  color: #8b5cf6;
+}
+
+.account-page {
+  padding-bottom: 48px;
+}
+
+.account-list {
+  display: grid;
+  gap: 12px;
+  list-style: none;
+  margin: 24px 0;
+  padding: 0;
+}
+
+.account-card {
+  align-items: center;
+  border: 1px solid var(--border, #30363d);
+  border-radius: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 18px;
+}
+
+.account-card h2,
+.account-card h3 {
+  margin: 0 0 8px;
+}
+
+.account-card p {
+  margin: 6px 0;
+}
+
+.primary-button,
+.secondary-button {
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  padding: 10px 14px;
+}
+
+.primary-button {
+  background: #7c3aed;
+  color: #fff;
+}
+
+.secondary-button {
+  background: #30363d;
+  color: inherit;
+}
+
+.primary-button:disabled,
+.secondary-button:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+
+.saved-action,
+.tracked-form {
+  margin: 20px 0;
+}
+
+.tracked-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.tracked-form input {
+  border: 1px solid var(--border, #30363d);
+  border-radius: 8px;
+  flex: 1 1 240px;
+  font: inherit;
+  padding: 10px 12px;
+}
+
+.saved-score {
+  border: 1px solid var(--border, #30363d);
+  border-radius: 12px;
+  margin: 24px 0;
+  padding: 20px;
+}
+
+.saved-score > strong {
+  font-size: 2.4rem;
+}
+
+.saved-score small {
+  font-size: 1rem;
+}
+
+.saved-category {
+  display: block;
+}
+
+.saved-category h3 {
+  margin-bottom: 8px;
+}
+
+@media (max-width: 650px) {
+  .header-links {
+    gap: 8px 12px;
+  }
+}

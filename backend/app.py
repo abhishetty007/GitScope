@@ -1,4 +1,6 @@
 from flask import Flask, jsonify
+import os
+
 from flask_cors import CORS
 
 from services.github_service import (
@@ -24,7 +26,16 @@ import cache as _cache
 
 app = Flask(__name__)
 
-CORS(app)
+_cors_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "GITSCOPE_CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if origin.strip()
+]
+if _cors_origins:
+    CORS(app, resources={r"/api/*": {"origins": _cors_origins}})
 
 
 # =========================================================
@@ -227,6 +238,30 @@ def github_repository(owner, repository):
         return jsonify({
             "error": str(error)
         }), 500
+
+
+@app.route("/api/github/repository/<owner>/<repository>/identity")
+def github_repository_identity(owner, repository):
+    """Return the stable public GitHub repository identity for Next.js persistence."""
+    try:
+        repo = get_repository(owner, repository)
+        if repo is None or repo.get("private", False):
+            return jsonify({"error": "Repository not found"}), 404
+
+        repo_id = repo.get("id")
+        if repo_id is None:
+            return jsonify({"error": "Repository not found"}), 404
+
+        return jsonify({
+            "provider": "github",
+            "provider_repo_id": str(repo_id),
+            "owner_login": repo.get("owner", {}).get("login") or owner,
+            "name": repo.get("name") or repository,
+            "visibility": "public",
+            "html_url": repo.get("html_url"),
+        })
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
 
 
 # =========================================================

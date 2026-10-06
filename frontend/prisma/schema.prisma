@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id                  String               @id @default(uuid()) @db.Uuid
+  createdAt           DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  identities          Identity[]
+  savedAnalyses       SavedAnalysis[]
+  trackedRepositories TrackedRepository[]
+
+  @@map("users")
+}
+
+model Identity {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  issuer    String   @db.VarChar(512)
+  subject   String   @db.VarChar(255)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([issuer, subject])
+  @@index([userId])
+  @@map("identities")
+}
+
+model Repository {
+  id                  String               @id @default(uuid()) @db.Uuid
+  provider            String               @default("github") @db.VarChar(32)
+  providerRepoId      BigInt               @map("provider_repo_id")
+  ownerLogin          String               @map("owner_login") @db.VarChar(255)
+  name                String               @db.VarChar(255)
+  visibility          String               @default("public") @db.VarChar(16)
+  createdAt           DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  analyses            Analysis[]
+  trackedRepositories TrackedRepository[]
+
+  @@unique([provider, providerRepoId])
+  @@index([provider, ownerLogin, name])
+  @@map("repositories")
+}
+
+model Analysis {
+  id              String          @id @default(uuid()) @db.Uuid
+  repositoryId    String          @map("repository_id") @db.Uuid
+  analyzerVersion String          @map("analyzer_version") @db.VarChar(64)
+  snapshotHash    String          @map("snapshot_hash") @db.Char(64)
+  score           Float?
+  result          Json            @db.JsonB
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  sourceUpdatedAt DateTime?       @map("source_updated_at") @db.Timestamptz(3)
+  repository      Repository      @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  savedBy         SavedAnalysis[]
+
+  @@unique([repositoryId, analyzerVersion, snapshotHash])
+  @@index([repositoryId, createdAt(sort: Desc)])
+  @@map("analyses")
+}
+
+model SavedAnalysis {
+  userId     String   @map("user_id") @db.Uuid
+  analysisId String   @map("analysis_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  analysis   Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@id([userId, analysisId])
+  @@index([analysisId])
+  @@map("saved_analyses")
+}
+
+model TrackedRepository {
+  userId       String     @map("user_id") @db.Uuid
+  repositoryId String     @map("repository_id") @db.Uuid
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@id([userId, repositoryId])
+  @@index([repositoryId])
+  @@map("tracked_repositories")
+}

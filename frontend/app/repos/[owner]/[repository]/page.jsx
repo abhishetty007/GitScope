@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import Header from "../../../../src/components/layout/Header";
 import ApiErrorState from "../../../../src/components/layout/ApiErrorState";
 import RepositoryAnalyticsClient from "../../../../src/components/dashboard/RepositoryAnalyticsClient";
+import SaveAnalysisButton from "../../../../src/components/saved/SaveAnalysisButton";
 import { getRepositoryAnalyticsPageData } from "../../../../src/services/server-data";
 import { safeMetadataText } from "../../../../src/services/seo";
 
@@ -53,6 +54,7 @@ export default async function RepositoryAnalyticsPage({ params }) {
       <Header />
       <main className="container">
         <h1 className="page-title">Engineering health: {fullName}</h1>
+        <SaveAnalysisButton owner={owner} repository={repository} />
         <RepositoryAnalyticsClient data={data} />
       </main>
     </>
