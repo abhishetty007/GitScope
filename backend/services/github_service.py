@@ -221,7 +221,17 @@ IMPORTANT_FILES = {
     "docker-compose.yml",
     "docker-compose.yaml",
 
-    ".gitignore"
+    ".gitignore",
+
+    # Workspace / monorepo declarations. These are read purely for
+    # monorepo detection and are not treated as dependency manifests.
+    "pnpm-workspace.yaml",
+    "pnpm-workspace.yml",
+    "lerna.json",
+    "nx.json",
+    "turbo.json",
+    "rush.json",
+    "go.work"
 }
 
 

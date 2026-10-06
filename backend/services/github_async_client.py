@@ -15,8 +15,9 @@ Execution order is:
 
 This matches the dependency graph identified in Phase 2A audit.
 
-Only file contents, commits, and contributors can be parallelised
-because they depend on the tree/repo metadata but not on each other.
+Only file contents, commits, contributors and workflow runs can be
+parallelised because they depend on the tree/repo metadata but not
+on each other.
 
 Session reuse:
 - A single httpx.AsyncClient is used for all requests within one
@@ -26,7 +27,12 @@ Error handling:
 - Individual file fetch failures are logged and skipped (partial
   degradation, not total failure).
 - GitHub 404 returns None, consistent with github_service.py.
-- Rate limit responses (403/429) raise an explicit exception.
+- Only genuine rate exhaustion raises: a 429, or a 403 carrying
+  X-RateLimit-Remaining: 0 or Retry-After. Ordinary 403 responses
+  (missing scope, Actions disabled, blocked content) are not rate
+  limits and must never be surfaced as such.
+- Optional endpoints (workflow runs) degrade to empty evidence
+  instead of failing the whole collection.
 - Timeouts raise httpx.TimeoutException which propagates.
 
 Credentials:
@@ -69,6 +75,10 @@ _TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
 # Keeps us well under GitHub's secondary rate-limit heuristics.
 _MAX_FILE_CONCURRENCY = 8
 
+# Workflow runs are deliberately a single bounded page. Long paginated
+# run history is not required for the CI signals GitScope scores.
+_WORKFLOW_RUN_PAGE_SIZE = 20
+
 
 def _build_headers() -> dict:
     headers = {
@@ -80,14 +90,44 @@ def _build_headers() -> dict:
     return headers
 
 
+def _is_rate_limited(response: httpx.Response) -> bool:
+    """
+    True only when the response represents GitHub rate exhaustion.
+
+    GitHub uses 403 for several unrelated conditions — a token missing
+    a scope, Actions disabled on the repository, blocked content. The
+    old check treated every 403 as a rate limit, which turned ordinary
+    permission failures into spurious 429s. The decision is therefore
+    driven by the headers GitHub sets for primary and secondary limits.
+    """
+
+    if response.status_code == 429:
+        return True
+
+    if response.status_code != 403:
+        return False
+
+    if response.headers.get("X-RateLimit-Remaining") == "0":
+        return True
+
+    # Secondary rate limits are reported with a Retry-After hint and
+    # may leave the primary remaining count untouched.
+    if response.headers.get("Retry-After"):
+        return True
+
+    return False
+
+
 def _check_rate_limit(response: httpx.Response, url: str) -> None:
-    if response.status_code in (403, 429):
-        remaining = response.headers.get("X-RateLimit-Remaining", "?")
-        reset = response.headers.get("X-RateLimit-Reset", "?")
-        raise RuntimeError(
-            f"GitHub rate limit hit on {url}. "
-            f"Remaining={remaining}, Reset={reset}"
-        )
+    if not _is_rate_limited(response):
+        return
+
+    remaining = response.headers.get("X-RateLimit-Remaining", "?")
+    reset = response.headers.get("X-RateLimit-Reset", "?")
+    raise RuntimeError(
+        f"GitHub rate limit hit on {url}. "
+        f"Remaining={remaining}, Reset={reset}"
+    )
 
 
 # -----------------------------------------------------------------
@@ -98,12 +138,27 @@ async def _async_get(
     client: httpx.AsyncClient,
     endpoint: str,
     params: dict = None,
+    optional: bool = False,
 ) -> dict | list | None:
+    """
+    Fetch and decode a GitHub endpoint.
+
+    Returns None on 404. When ``optional`` is True any other HTTP
+    error also returns None, so callers can treat a restricted or
+    unavailable endpoint as absent evidence rather than failing the
+    entire evidence collection.
+    """
+
     url = f"{GITHUB_API_URL}{endpoint}"
     response = await client.get(url, params=params or {})
     _check_rate_limit(response, url)
+
     if response.status_code == 404:
         return None
+
+    if optional and response.status_code >= 400:
+        return None
+
     response.raise_for_status()
     return response.json()
 
@@ -283,6 +338,7 @@ async def _collect_evidence_async(owner: str, repository: str) -> dict | None:
 
         commits_cache_key = _cache.commits_key(owner, repository)
         contributors_cache_key = _cache.contributors_key(owner, repository)
+        runs_cache_key = _cache.runs_key(owner, repository)
 
         cached_commits = _cache.get_raw(commits_cache_key)
         cached_contributors = _cache.get_raw(contributors_cache_key)
@@ -309,19 +365,58 @@ async def _collect_evidence_async(owner: str, repository: str) -> dict | None:
             _cache.set_raw(contributors_cache_key, contributors)
             return contributors
 
+        async def fetch_workflow_runs():
+            """
+            Newest workflow runs, one bounded page.
+
+            Optional evidence: repositories with Actions disabled, or
+            tokens lacking the actions scope, report an empty history
+            rather than failing the whole collection. Run history is
+            skipped entirely when no token is configured, because the
+            unauthenticated quota is far too small to spend on it.
+            """
+            if not GITHUB_TOKEN:
+                return []
+
+            cached_runs = _cache.get_raw(runs_cache_key)
+            if cached_runs is not None:
+                return cached_runs
+
+            data = await _async_get(
+                client,
+                f"/repos/{owner}/{repository}/actions/runs",
+                params={"per_page": _WORKFLOW_RUN_PAGE_SIZE},
+                optional=True,
+            )
+
+            runs = []
+            if isinstance(data, dict):
+                runs = data.get("workflow_runs") or []
+
+            _cache.set_raw(runs_cache_key, runs)
+            return runs
+
         # Launch all concurrent tasks at once
         file_tasks = [bounded_fetch(p) for p in files_to_read]
         all_tasks = file_tasks + [
             asyncio.ensure_future(fetch_commits()),
             asyncio.ensure_future(fetch_contributors()),
+            asyncio.ensure_future(fetch_workflow_runs()),
         ]
         results = await asyncio.gather(*all_tasks, return_exceptions=True)
 
-        # Separate file results from commits/contributors
+        # Separate file results from the repository-level tasks
         n_files = len(file_tasks)
         file_results = results[:n_files]
         commits_result = results[n_files]
         contributors_result = results[n_files + 1]
+        workflow_runs_result = results[n_files + 2]
+
+        # Preserve true Actions rate-limit failures so the existing API
+        # handler can return 429. Other optional endpoint failures remain
+        # unavailable evidence and do not fail repository analysis.
+        if isinstance(workflow_runs_result, RuntimeError):
+            raise workflow_runs_result
 
         # Build file_contents dict, skipping any failed fetches
         file_contents: dict[str, str] = {}
@@ -335,6 +430,11 @@ async def _collect_evidence_async(owner: str, repository: str) -> dict | None:
         # Normalise commits/contributors (exceptions → empty list)
         commits = commits_result if isinstance(commits_result, list) else []
         contributors = contributors_result if isinstance(contributors_result, list) else []
+        workflow_runs = (
+            workflow_runs_result
+            if isinstance(workflow_runs_result, list)
+            else []
+        )
 
     # ----------------------------------------------------------
     # Assemble evidence dict — identical shape to github_service.py
@@ -399,10 +499,11 @@ async def _collect_evidence_async(owner: str, repository: str) -> dict | None:
             "has_source_code": len(source_files) > 0,
             "has_docs": len(documentation_files) > 0,
         },
-        # Include raw commits/contributors so app.py can reuse them
-        # without additional network calls.
+        # Include raw commits/contributors/runs so app.py can reuse
+        # them without additional network calls.
         "_commits": commits,
         "_contributors": contributors,
+        "_workflow_runs": workflow_runs,
     }
 
     return evidence
@@ -420,11 +521,14 @@ def collect_evidence(owner: str, repository: str) -> dict | None:
     called from standard synchronous Flask routes.
 
     Returns the same evidence dict as get_repository_evidence() plus
-    two private keys:
+    three private keys:
         _commits      — raw commits list (reused by app.py)
         _contributors — raw contributors list (reused by app.py)
+
+    ``_workflow_runs`` holds the newest workflow runs, or an empty
+    list when run history is unavailable (no token configured,
+    Actions disabled, or the token lacking the actions scope).
 
     Returns None if the repository does not exist.
     """
     return asyncio.run(_collect_evidence_async(owner, repository))
-

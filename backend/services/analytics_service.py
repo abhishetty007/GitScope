@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
+import re
 from services.project_type_service import detect_project_type
+from services.monorepo_service import detect_monorepo
 
 
 # ============================================================
@@ -354,7 +356,7 @@ def analyze_repositories(repositories):
     }
 
 
-def analyze_contributors(contributors):
+def analyze_contributors(contributors, commits=None):
     """
     Analyze repository contributors, contribution sums, and top contributor.
     """
@@ -367,6 +369,12 @@ def analyze_contributors(contributors):
             "total_contributions": 0,
             "top": [],
             "top_contributor": None,
+            "top_contributor_share": 0.0,
+            "top3_share": 0.0,
+            "bus_factor_50": 0,
+            "bus_factor_80": 0,
+            "herfindahl_index": 0.0,
+            "recent_top_contributor_share_90d": 0.0,
         }
 
     top_contributors = []
@@ -391,12 +399,35 @@ def analyze_contributors(contributors):
         else None
     )
 
+    shares = sorted((int(c.get("contributions", 0) or 0) / total_contributions for c in contributors), reverse=True) if total_contributions else []
+    recent = {}
+    for commit in commits or []:
+        author = (commit.get("commit", {}).get("author", {}) or {}).get("name") or "Unknown"
+        age = _days_since((commit.get("commit", {}).get("author", {}) or {}).get("date"))
+        if age is not None and age <= 90:
+            recent[author] = recent.get(author, 0) + 1
+    recent_total = sum(recent.values())
+    recent_share = max(recent.values(), default=0) / recent_total if recent_total else 0.0
+    def bus_factor(threshold):
+        accumulated = 0.0
+        for index, share in enumerate(sorted(shares, reverse=True), 1):
+            accumulated += share
+            if accumulated >= threshold:
+                return index
+        return 0
+
     return {
         "total": len(contributors),
         "total_contributors": len(contributors),
         "total_contributions": total_contributions,
         "top": top_contributors,
         "top_contributor": top_contributor,
+        "top_contributor_share": round(shares[0], 4) if shares else 0.0,
+        "top3_share": round(sum(sorted(shares, reverse=True)[:3]), 4),
+        "bus_factor_50": bus_factor(0.50),
+        "bus_factor_80": bus_factor(0.80),
+        "herfindahl_index": round(sum(s * s for s in shares), 4),
+        "recent_top_contributor_share_90d": round(recent_share, 4),
     }
 
 
@@ -417,11 +448,15 @@ def analyze_commits(commits):
             "commits_by_author": {},
             "commits_by_month": {},
             "top_commit_author": None,
+            "commits_last_30_days": 0, "commits_last_365_days": 0,
+            "active_months": 0, "longest_gap_days": 0, "days_since_last_commit": None,
         }
 
     recent = 0
     commits_by_author = {}
     commits_by_month = {}
+    dated_commits = []
+    commits_30 = commits_365 = 0
 
     for commit in commits:
         commit_data = commit.get("commit", {}) or {}
@@ -437,6 +472,12 @@ def analyze_commits(commits):
         parsed = _parse_date(date_str)
 
         if parsed:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            dated_commits.append(parsed)
+            age_days = max(0, (datetime.now(timezone.utc) - parsed).days)
+            commits_30 += age_days <= 30
+            commits_365 += age_days <= 365
             month_key = parsed.strftime("%Y-%m")
             commits_by_month[month_key] = (
                 commits_by_month.get(month_key, 0) + 1
@@ -460,6 +501,8 @@ def analyze_commits(commits):
     else:
         top_commit_author = None
 
+    sorted_dates = sorted(dated_commits)
+    gaps = [(b-a).total_seconds() / 86400 for a, b in zip(sorted_dates, sorted_dates[1:])]
     return {
         "total": len(commits),
         "total_commits": len(commits),
@@ -469,7 +512,90 @@ def analyze_commits(commits):
         "commits_by_author": commits_by_author,
         "commits_by_month": sorted_months,
         "top_commit_author": top_commit_author,
+        "commits_last_30_days": commits_30,
+        "commits_last_365_days": commits_365,
+        "active_months": len(commits_by_month),
+        "longest_gap_days": round(max(gaps), 1) if gaps else 0,
+        "days_since_last_commit": max(0, (datetime.now(timezone.utc) - max(dated_commits)).days) if dated_commits else None,
     }
+
+
+def _ci_result(runs):
+    completed = [r for r in (runs or []) if r.get("status") == "completed"]
+    if not completed:
+        return None
+    completed.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or "", reverse=True)
+    successes = sum(1 for r in completed if r.get("conclusion") == "success")
+    return {"completed_runs": len(completed), "success_rate": round(successes / len(completed), 4), "latest_conclusion": completed[0].get("conclusion")}
+
+
+def _ci_status(runs, has_ci):
+    if not has_ci or runs is None:
+        return "N/A"
+    result = _ci_result(runs)
+    if not result or result["completed_runs"] < 3:
+        return "N/A"
+    if result["success_rate"] >= 0.80 and result["latest_conclusion"] != "failure":
+        return "PASS"
+    return "PARTIAL" if result["success_rate"] >= 0.50 else "NOT_DETECTED"
+
+
+def _ci_evidence(runs, has_ci):
+    result = _ci_result(runs or [])
+    if not has_ci:
+        return "CI workflows were not detected."
+    if not result or result["completed_runs"] < 3:
+        return "Recent completed run evidence is unavailable or insufficient."
+    return f'{result["completed_runs"]} completed runs; success rate {result["success_rate"]:.0%}; latest conclusion {result["latest_conclusion"] or "unknown"}.'
+
+
+def _workflow_hardening(file_contents):
+    contents = [text for _, text in _workflow_contents(file_contents)]
+    if not contents:
+        return None
+    uses = re.findall(r"(?im)^\s*-?\s*uses:\s*([^\s#]+)", "\n".join(contents))
+    pinned = bool(uses) and all(re.search(r"@[0-9a-fA-F]{40}(?:\s|$)", use) for use in uses)
+    permissions = any(re.search(r"(?m)^permissions\s*:", text) for text in contents)
+    return pinned, permissions
+
+
+def _workflow_hardening_status(file_contents):
+    protections = _workflow_hardening(file_contents)
+    if protections is None:
+        return "N/A"
+    count = sum(protections)
+    return "PASS" if count == 2 else ("PARTIAL" if count == 1 else "NOT_DETECTED")
+
+
+def _workflow_hardening_evidence(file_contents):
+    protections = _workflow_hardening(file_contents)
+    if protections is None:
+        return "No workflow content was available."
+    return f"SHA-pinned actions: {'yes' if protections[0] else 'no'}; top-level permissions block: {'yes' if protections[1] else 'no'}."
+
+
+def _contributor_shares(contributors):
+    counts = [max(0, int(c.get("contributions", 0) or 0)) for c in (contributors or [])]
+    total = sum(counts)
+    return sorted((c / total for c in counts), reverse=True) if total else []
+
+
+def _concentration_status(contributors):
+    if len(contributors or []) <= 1:
+        return "N/A"
+    shares = _contributor_shares(contributors)
+    if not shares:
+        return "N/A"
+    return "PASS" if shares[0] <= 0.50 else ("PARTIAL" if shares[0] <= 0.75 else "NOT_DETECTED")
+
+
+def _concentration_evidence(contributors):
+    shares = _contributor_shares(contributors)
+    if len(contributors or []) <= 1:
+        return "Not applicable to a solo repository."
+    if not shares:
+        return "Contributor contribution totals were unavailable."
+    return f"Top contributor holds {shares[0]:.0%} of recorded contributions."
 
 
 # ============================================================
@@ -480,6 +606,7 @@ def analyze_engineering_health(
     evidence,
     commits=None,
     contributors=None,
+    workflow_runs=None,
 ):
     """
     Evidence-driven engineering health analysis.
@@ -525,6 +652,9 @@ def analyze_engineering_health(
         evidence.get("file_contents", {})
         or {}
     )
+
+    workflow_runs = workflow_runs or []
+    monorepo = detect_monorepo(structure, file_contents)
 
     # --------------------------------------------------------
     # Project type
@@ -766,6 +896,12 @@ def analyze_engineering_health(
                 )
             ),
         },
+        {
+            "name": "Workspace / monorepo layout",
+            "status": ("PASS" if monorepo["explicit"] else "PARTIAL") if monorepo["is_monorepo"] else "N/A",
+            "weight": 4,
+            "evidence": "; ".join(monorepo["signals"]) if monorepo["signals"] else "No meaningful workspace or multi-package signals detected.",
+        },
     ]
 
     code_result = _score_from_checks(
@@ -829,6 +965,12 @@ def analyze_engineering_health(
                     )
                 )
             ),
+        },
+        {
+            "name": "CI passing (recent runs)",
+            "status": _ci_status(workflow_runs, has_ci),
+            "weight": 4,
+            "evidence": _ci_evidence(workflow_runs, has_ci),
         },
     ]
 
@@ -982,6 +1124,12 @@ def analyze_engineering_health(
                 )
             ),
         },
+        {
+            "name": "Workflow hardening",
+            "status": _workflow_hardening_status(file_contents),
+            "weight": 3,
+            "evidence": _workflow_hardening_evidence(file_contents),
+        },
     ]
 
     security_result = _score_from_checks(
@@ -1036,6 +1184,11 @@ def analyze_engineering_health(
             f"last activity was {days_since_activity} day(s) ago."
         )
 
+    intentionally_frozen = bool(repository.get("archived") or repository.get("disabled"))
+    if intentionally_frozen:
+        maintenance_activity_status = "N/A"
+        maintenance_activity_evidence = "Recent activity is not scored because the repository is archived or disabled."
+
     history_available = bool(
         evidence.get(
             "history_available",
@@ -1070,6 +1223,23 @@ def analyze_engineering_health(
             "No commits were available in the analyzed history."
         )
 
+    commit_stats = analyze_commits(commits)
+    if not history_available:
+        cadence_status, cadence_evidence = "N/A", "Commit history was unavailable."
+    elif intentionally_frozen:
+        cadence_status, cadence_evidence = "N/A", "Commit cadence is not scored for an archived or disabled repository."
+    elif len(commits) < 2:
+        cadence_status, cadence_evidence = "PARTIAL", "Too little commit history is available to assess cadence consistency."
+    else:
+        gap = commit_stats["longest_gap_days"]
+        if commit_stats["active_months"] >= 6 and gap <= 120:
+            cadence_status = "PASS"
+        elif commit_stats["active_months"] >= 2 and gap <= 365:
+            cadence_status = "PARTIAL"
+        else:
+            cadence_status = "NOT_DETECTED"
+        cadence_evidence = f'{commit_stats["active_months"]} active month(s); longest observed gap {gap} day(s).'
+
     maintenance_checks = [
         {
             "name": "Recent repository activity",
@@ -1083,6 +1253,7 @@ def analyze_engineering_health(
             "weight": 5,
             "evidence": historical_evidence,
         },
+        {"name": "Commit cadence consistency", "status": cadence_status, "weight": 3, "evidence": cadence_evidence},
     ]
 
     maintenance_result = _score_from_checks(
@@ -1140,6 +1311,12 @@ def analyze_engineering_health(
                     "CONTRIBUTING.md was not detected."
                 )
             ),
+        },
+        {
+            "name": "Contributor concentration / bus factor",
+            "status": _concentration_status(contributors),
+            "weight": 3,
+            "evidence": _concentration_evidence(contributors),
         },
     ]
 
@@ -1350,6 +1527,9 @@ def analyze_engineering_health(
             "confidence": project_type.get("confidence"),
             "signals": project_type.get("signals", []),
         },
+
+        "monorepo": monorepo,
+        "ci": _ci_result(workflow_runs),
 
         "categories": categories,
 

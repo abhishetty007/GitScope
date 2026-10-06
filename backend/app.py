@@ -383,6 +383,7 @@ def github_repository_analytics(
         # fetched concurrently alongside file contents.
         commits = evidence.pop("_commits", []) or []
         contributors = evidence.pop("_contributors", []) or []
+        workflow_runs = evidence.pop("_workflow_runs", None)
 
         evidence["history_available"] = bool(commits)
 
@@ -394,11 +395,12 @@ def github_repository_analytics(
         health = analyze_engineering_health(
             evidence,
             commits,
-            contributors
+            contributors,
+            workflow_runs,
         )
 
         commit_analysis = analyze_commits(commits)
-        contributor_analysis = analyze_contributors(contributors)
+        contributor_analysis = analyze_contributors(contributors, commits)
 
         # -------------------------------------------------
         # Build response — identical contract as before

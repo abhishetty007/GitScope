@@ -15,6 +15,11 @@ Design decisions:
     "raw:commits:owner/repo"
     "raw:contributors:owner/repo"
     "raw:file:owner/repo:path"
+    "raw:runs:owner/repo"
+
+The owner/repository segment is normalised to lower case because
+GitHub treats both as case-insensitive; branches and file paths are
+case-sensitive and are preserved verbatim.
 """
 
 import threading
@@ -55,8 +60,21 @@ _raw_lock = threading.Lock()
 # Key helpers
 # -----------------------------------------------------------------
 
+def _repo_slug(owner: str, repository: str) -> str:
+    """
+    Canonical ``owner/repository`` identifier.
+
+    GitHub resolves owners and repositories case-insensitively, so
+    normalising here prevents duplicate cache entries — and therefore
+    duplicate upstream API calls — for the same repository requested
+    with different casing. Branches and file paths are case-sensitive
+    and must never be normalised.
+    """
+    return f"{(owner or '').lower()}/{(repository or '').lower()}"
+
+
 def _analysis_key(owner: str, repository: str) -> str:
-    return f"analysis:{owner}/{repository}"
+    return f"analysis:{_repo_slug(owner, repository)}"
 
 
 def _raw_key(*parts: str) -> str:
@@ -130,21 +148,24 @@ def clear_raw(cache_key: str = None) -> None:
 # -----------------------------------------------------------------
 
 def repo_key(owner: str, repository: str) -> str:
-    return _raw_key("raw", "repo", f"{owner}/{repository}")
+    return _raw_key("raw", "repo", _repo_slug(owner, repository))
 
 
 def tree_key(owner: str, repository: str, branch: str) -> str:
-    return _raw_key("raw", "tree", f"{owner}/{repository}", branch)
+    return _raw_key("raw", "tree", _repo_slug(owner, repository), branch)
 
 
 def commits_key(owner: str, repository: str) -> str:
-    return _raw_key("raw", "commits", f"{owner}/{repository}")
+    return _raw_key("raw", "commits", _repo_slug(owner, repository))
 
 
 def contributors_key(owner: str, repository: str) -> str:
-    return _raw_key("raw", "contributors", f"{owner}/{repository}")
+    return _raw_key("raw", "contributors", _repo_slug(owner, repository))
+
+
+def runs_key(owner: str, repository: str) -> str:
+    return _raw_key("raw", "runs", _repo_slug(owner, repository))
 
 
 def file_key(owner: str, repository: str, path: str, branch: str = "") -> str:
-    return _raw_key("raw", "file", f"{owner}/{repository}", branch, path)
-
+    return _raw_key("raw", "file", _repo_slug(owner, repository), branch, path)
