@@ -92,6 +92,13 @@ def github_repositories(username):
                 "error": "GitHub user not found"
             }), 404
 
+        # User-facing analytics pages are public. Do not reveal private
+        # repositories visible only through the server's GitHub token.
+        repositories = [
+            repo for repo in repositories
+            if not repo.get("private", False)
+        ]
+
         result = []
 
         for repo in repositories:
@@ -145,6 +152,11 @@ def github_analytics(username):
                 "error": "GitHub user not found"
             }), 404
 
+        repositories = [
+            repo for repo in repositories
+            if not repo.get("private", False)
+        ]
+
         analytics = analyze_repositories(
             repositories
         )
@@ -171,7 +183,7 @@ def github_repository(owner, repository):
             repository
         )
 
-        if repo is None:
+        if repo is None or repo.get("private", False):
             return jsonify({
                 "error": "Repository not found"
             }), 404
@@ -226,6 +238,10 @@ def github_repository(owner, repository):
 )
 def github_commits(owner, repository):
     try:
+        repo = get_repository(owner, repository)
+        if repo is None or repo.get("private", False):
+            return jsonify({"error": "Repository not found"}), 404
+
         commits = get_repository_commits(
             owner,
             repository
@@ -284,6 +300,10 @@ def github_commits(owner, repository):
 )
 def github_contributors(owner, repository):
     try:
+        repo = get_repository(owner, repository)
+        if repo is None or repo.get("private", False):
+            return jsonify({"error": "Repository not found"}), 404
+
         contributors = get_repository_contributors(
             owner,
             repository
@@ -348,9 +368,20 @@ def github_repository_analytics(
     repository
 ):
     try:
+        # Always confirm current visibility before serving a cached public
+        # analysis. Refresh the shared metadata entry so a cache miss can
+        # reuse this request's GitHub response in the async collector.
+        repo = get_repository(owner, repository)
+        if repo is None or repo.get("private", False):
+            return jsonify({
+                "error": "Repository not found"
+            }), 404
+
+        _cache.set_raw(_cache.repo_key(owner, repository), repo)
+
         # -------------------------------------------------
         # Outer cache — serve a complete cached response
-        # immediately if available.
+        # after confirming the repository is still public.
         # -------------------------------------------------
 
         cached_result = _cache.get_analysis(owner, repository)

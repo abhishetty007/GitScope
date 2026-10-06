@@ -28,14 +28,96 @@ button {
   background: #161b22;
 }
 
-.header h1 {
+.header .brand-title {
+  display: inline-block;
   margin: 0;
   font-size: 32px;
+  font-weight: 700;
+  color: inherit;
+  text-decoration: none;
 }
 
-.header p {
+.header .brand-tagline {
   margin: 6px 0 0;
   color: #8b949e;
+}
+
+.page-title {
+  margin: 0 0 24px;
+  color: #e6edf3;
+  font-size: clamp(1.6rem, 4vw, 2.4rem);
+}
+
+.landing-page {
+  padding-top: clamp(50px, 10vh, 110px);
+}
+
+.landing-hero,
+.landing-details {
+  max-width: 780px;
+  margin: 0 auto 36px;
+}
+
+.landing-hero h1 {
+  max-width: 750px;
+  margin: 8px 0 18px;
+  color: #e6edf3;
+  font-size: clamp(2.2rem, 6vw, 4.2rem);
+  line-height: 1.08;
+}
+
+.eyebrow {
+  color: #58a6ff;
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.landing-copy,
+.landing-details p {
+  max-width: 680px;
+  color: #9da7b3;
+  font-size: 1.1rem;
+  line-height: 1.6;
+}
+
+.landing-hero .search-card {
+  margin-top: 30px;
+}
+
+.landing-details {
+  padding: 24px 0;
+  border-top: 1px solid #30363d;
+}
+
+.landing-details h2 {
+  color: #e6edf3;
+}
+
+.loading-state,
+.error-page {
+  padding: 28px;
+  color: #e6edf3;
+}
+
+.error-page h1 {
+  color: #e6edf3;
+}
+
+.error-page button {
+  margin-top: 18px;
+  padding: 10px 16px;
+}
+
+@media (max-width: 640px) {
+  .header {
+    padding: 22px 5%;
+  }
+
+  .search-box {
+    flex-direction: column;
+  }
 }
 
 .container {

@@ -267,6 +267,12 @@ async def _collect_evidence_async(owner: str, repository: str) -> dict | None:
                 return None
             _cache.set_raw(repo_cache_key, repo)
 
+        # This collector backs public analysis pages. A configured server
+        # token may have access to private repositories; do not expose them
+        # through the unauthenticated Flask API.
+        if repo.get("private", False):
+            return None
+
         default_branch = repo.get("default_branch", "main")
 
         # ----------------------------------------------------------

@@ -442,7 +442,7 @@ def get_repository_evidence(owner, repository, repo=None):
             repository
         )
 
-    if repo is None:
+    if repo is None or repo.get("private", False):
         return None
 
     default_branch = repo.get(

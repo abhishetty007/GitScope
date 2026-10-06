@@ -1,3 +1,5 @@
+"use client";
+
 import {
   PieChart,
   Pie,
@@ -104,4 +106,3 @@ function ProfileAnalytics({ analytics, username, onAnalyzeRepo, analyzingRepo })
 }
 
 export default ProfileAnalytics;
-

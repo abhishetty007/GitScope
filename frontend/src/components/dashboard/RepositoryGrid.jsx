@@ -1,3 +1,5 @@
+"use client";
+
 import { useState } from "react";
 
 function RepositoryGrid({ repositories, onAnalyzeRepo, analyzingRepo }) {
@@ -102,4 +104,3 @@ function RepositoryGrid({ repositories, onAnalyzeRepo, analyzingRepo }) {
 }
 
 export default RepositoryGrid;
-

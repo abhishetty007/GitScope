@@ -1,3 +1,5 @@
+"use client";
+
 import {
   BarChart,
   Bar,
@@ -386,4 +388,3 @@ function HealthDashboard({ data, error }) {
 }
 
 export default HealthDashboard;
-

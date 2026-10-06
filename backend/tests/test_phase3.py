@@ -117,8 +117,124 @@ class TestActionsCollection(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await _async_get(client, "/actions/runs", optional=True)
 
-
+    async def test_private_repository_is_not_collected_for_public_analysis(self):
+        from services.github_async_client import _collect_evidence_async
+        response = _response({"private": True, "default_branch": "main"})
+        mock_get = AsyncMock(return_value=response)
+        with patch("httpx.AsyncClient.get", mock_get):
+            result = await _collect_evidence_async("alice", "private-repo")
+        self.assertIsNone(result)
+        self.assertEqual(mock_get.await_count, 1)
 class TestPhase3ApiContract(unittest.TestCase):
+    def test_public_repository_analytics_cache_is_served_after_visibility_check(self):
+        from app import app
+        import cache as app_cache
+        cached = {"repository": {"full_name": "alice/repo"}, "health": {"score": 81}}
+        app_cache.clear_analysis("alice", "repo")
+        app_cache.set_analysis("alice", "repo", cached)
+        with patch("app.get_repository", return_value={"private": False}), \
+             patch("app.collect_evidence") as collect:
+            response = app.test_client().get(
+                "/api/github/repository/alice/repo/analytics"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), cached)
+        collect.assert_not_called()
+
+    def test_private_or_missing_repository_does_not_serve_cached_analytics(self):
+        from app import app
+        import cache as app_cache
+        cached = {"repository": {"full_name": "alice/repo"}, "health": {"score": 81}}
+        client = app.test_client()
+        for metadata in ({"private": True}, None):
+            app_cache.clear_analysis("alice", "repo")
+            app_cache.set_analysis("alice", "repo", cached)
+            with patch("app.get_repository", return_value=metadata), \
+                 patch("app.collect_evidence") as collect:
+                response = client.get(
+                    "/api/github/repository/alice/repo/analytics"
+                )
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.get_json(), {"error": "Repository not found"})
+            collect.assert_not_called()
+
+    def test_analytics_cache_miss_reuses_fresh_visibility_metadata(self):
+        from app import app
+        import cache as app_cache
+        app_cache.clear_analysis("alice", "repo")
+        evidence = {
+            "repository": {"name": "repo", "full_name": "alice/repo"},
+            "structure": {}, "important_files": {}, "workflows": [],
+            "repository_flags": {}, "file_contents": {},
+            "_commits": [], "_contributors": [], "_workflow_runs": [],
+        }
+        with patch("app.get_repository", return_value={"private": False}), \
+             patch("app.collect_evidence", return_value=evidence) as collect:
+            response = app.test_client().get(
+                "/api/github/repository/alice/repo/analytics"
+            )
+        self.assertEqual(response.status_code, 200)
+        collect.assert_called_once_with("alice", "repo")
+        self.assertEqual(
+            app_cache.get_raw(app_cache.repo_key("alice", "repo")),
+            {"private": False},
+        )
+
+    def test_user_repository_routes_exclude_private_repositories(self):
+        from app import app
+        public = {"name": "public", "full_name": "alice/public", "private": False, "stargazers_count": 4}
+        private = {"name": "private", "full_name": "alice/private", "private": True, "stargazers_count": 99}
+        with patch("app.get_user_repositories", return_value=[public, private]):
+            client = app.test_client()
+            listing = client.get("/api/github/user/alice/repositories")
+            analytics = client.get("/api/github/user/alice/analytics")
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual([repo["name"] for repo in listing.get_json()], ["public"])
+        self.assertEqual(analytics.get_json()["total_repositories"], 1)
+        self.assertEqual(analytics.get_json()["total_stars"], 4)
+
+    def test_private_repository_analysis_returns_existing_not_found_shape(self):
+        from app import app
+        with patch("app.get_repository", return_value={"private": True}), \
+             patch("app.collect_evidence") as collect:
+            response = app.test_client().get("/api/github/repository/alice/private/analytics")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json(), {"error": "Repository not found"})
+        collect.assert_not_called()
+
+    def test_private_repository_detail_history_and_evidence_are_hidden(self):
+        from app import app
+        from services.github_service import get_repository_evidence
+        private = {"private": True, "name": "private"}
+        client = app.test_client()
+        with patch("app.get_repository", return_value=private):
+            for path in (
+                "/api/github/repository/alice/private",
+                "/api/github/repository/alice/private/commits",
+                "/api/github/repository/alice/private/contributors",
+            ):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.get_json(), {"error": "Repository not found"})
+        self.assertIsNone(get_repository_evidence("alice", "private", repo=private))
+
+    def test_commits_and_contributors_routes_still_check_visibility(self):
+        from app import app
+        client = app.test_client()
+        with patch("app.get_repository", return_value={"private": True}), \
+             patch("app.get_repository_commits") as commits, \
+             patch("app.get_repository_contributors") as contributors:
+            commits_response = client.get(
+                "/api/github/repository/alice/private/commits"
+            )
+            contributors_response = client.get(
+                "/api/github/repository/alice/private/contributors"
+            )
+        self.assertEqual(commits_response.status_code, 404)
+        self.assertEqual(contributors_response.status_code, 404)
+        commits.assert_not_called()
+        contributors.assert_not_called()
+
     def test_existing_analytics_fields_preserved_and_runs_private(self):
         from app import app
         from unittest.mock import patch as mock_patch
@@ -131,7 +247,8 @@ class TestPhase3ApiContract(unittest.TestCase):
             "_commits": [], "_contributors": [],
             "_workflow_runs": [{"status": "completed", "conclusion": "success"}],
         }
-        with mock_patch("app.collect_evidence", return_value=evidence):
+        with mock_patch("app.get_repository", return_value={"private": False}), \
+             mock_patch("app.collect_evidence", return_value=evidence):
             response = app.test_client().get("/api/github/repository/alice/repo/analytics")
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()

@@ -12,6 +12,7 @@ function SearchSection({
       <div className="search-box">
         <input
           type="text"
+          aria-label="GitHub username"
           placeholder="Enter GitHub username"
           value={username}
           onChange={(event) => setUsername(event.target.value)}
@@ -33,4 +34,3 @@ function SearchSection({
 }
 
 export default SearchSection;
-

@@ -1,10 +1,13 @@
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000";
+const BASE_URL =
+  process.env.GITSCOPE_API_BASE_URL || "http://127.0.0.1:5000";
 
 async function handleResponse(response, defaultErrorMsg) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(data.error || defaultErrorMsg);
+    const error = new Error(data.error || defaultErrorMsg);
+    error.status = response.status;
+    throw error;
   }
 
   return data;
@@ -39,4 +42,3 @@ export async function fetchRepositoryAnalytics(owner, repository) {
   );
   return handleResponse(response, "Unable to fetch repository analytics.");
 }
-

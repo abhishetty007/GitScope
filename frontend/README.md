@@ -1,16 +1,28 @@
-# React + Vite
+# GitScope frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+GitScope uses the Next.js App Router for server-rendered public pages and keeps
+the Flask API as a separate service.
 
-Currently, two official plugins are available:
+## Development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+1. Start the Flask API from `backend`.
+2. Copy `.env.example` to `.env.local` and set `GITSCOPE_API_BASE_URL` to the API
+   origin (the local default is `http://127.0.0.1:5000`).
+3. Run `npm install`, then `npm run dev`.
 
-## React Compiler
+## Production configuration
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Set `GITSCOPE_API_BASE_URL` in the Next.js server environment to the reachable
+Flask API origin. Set `GITSCOPE_SITE_URL` before building to the deployed
+frontend origin, including its scheme and host (using the value supplied by the
+hosting environment). The API URL is read server-side and is not exposed as a
+browser configuration value. Do not put credentials in either variable.
 
-## Expanding the Oxlint configuration
+Build with `npm run build` and run the Node server with `npm start`. Because
+public analytics pages are server-rendered, deploy the frontend to a Node-capable
+Next.js host; static-only hosting is not sufficient. Configure the Flask API's
+production CORS policy for any remaining browser-facing integrations.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+The sitemap intentionally lists only the landing page. User and repository
+analytics pages are shareable but currently emit `noindex` metadata, avoiding an
+unbounded index of arbitrary GitHub entities.
