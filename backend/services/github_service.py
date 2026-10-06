@@ -406,19 +406,31 @@ def get_repository_file(
     }
 
 
-def get_repository_evidence(owner, repository):
+def get_repository_evidence(owner, repository, repo=None):
     """
     Collect observable repository evidence.
 
     This function intentionally does NOT score the repository.
 
     It collects facts that the analysis engine can later evaluate.
+
+    Parameters
+    ----------
+    owner : str
+        Repository owner login.
+    repository : str
+        Repository name.
+    repo : dict, optional
+        Pre-fetched repository metadata from get_repository().
+        When provided the internal get_repository() call is skipped,
+        eliminating a redundant GitHub API request.
     """
 
-    repo = get_repository(
-        owner,
-        repository
-    )
+    if repo is None:
+        repo = get_repository(
+            owner,
+            repository
+        )
 
     if repo is None:
         return None

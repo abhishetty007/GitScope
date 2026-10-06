@@ -10,12 +10,16 @@ from services.github_service import (
     get_repository_evidence
 )
 
+from services.github_async_client import collect_evidence
+
 from services.analytics_service import (
     analyze_repositories,
     analyze_contributors,
     analyze_commits,
     analyze_engineering_health
 )
+
+import cache as _cache
 
 
 app = Flask(__name__)
@@ -345,59 +349,46 @@ def github_repository_analytics(
 ):
     try:
         # -------------------------------------------------
-        # Repository metadata
+        # Outer cache — serve a complete cached response
+        # immediately if available.
         # -------------------------------------------------
 
-        repo = get_repository(
-            owner,
-            repository
-        )
+        cached_result = _cache.get_analysis(owner, repository)
+        if cached_result is not None:
+            return jsonify(cached_result)
 
-        if repo is None:
+        # -------------------------------------------------
+        # Async concurrent evidence collection.
+        #
+        # collect_evidence() runs:
+        #   repo metadata (seq)
+        #     ↓
+        #   repository tree (seq)
+        #     ↓
+        #   file contents + commits + contributors (concurrent)
+        #
+        # It also performs inner-layer (raw) caching so that
+        # individual GitHub API payloads are reused on repeat
+        # requests within the TTL window.
+        # -------------------------------------------------
+
+        evidence = collect_evidence(owner, repository)
+
+        if evidence is None:
             return jsonify({
                 "error": "Repository not found"
             }), 404
 
-        # -------------------------------------------------
-        # Evidence
-        # -------------------------------------------------
+        # Pull out the private keys that the collector already
+        # fetched concurrently alongside file contents.
+        commits = evidence.pop("_commits", []) or []
+        contributors = evidence.pop("_contributors", []) or []
 
-        evidence = get_repository_evidence(
-            owner,
-            repository
-        )
-
-        if evidence is None:
-            return jsonify({
-                "error": "Unable to collect repository evidence"
-            }), 500
+        evidence["history_available"] = bool(commits)
 
         # -------------------------------------------------
-        # History
-        # -------------------------------------------------
-
-        commits = get_repository_commits(
-            owner,
-            repository
-        )
-
-        contributors = get_repository_contributors(
-            owner,
-            repository
-        )
-
-        if commits is None:
-            commits = []
-
-        if contributors is None:
-            contributors = []
-
-        evidence["history_available"] = bool(
-            commits
-        )
-
-        # -------------------------------------------------
-        # Analysis
+        # Deterministic analysis — pure Python, ~0.4 ms
+        # (scoring logic is unchanged)
         # -------------------------------------------------
 
         health = analyze_engineering_health(
@@ -406,86 +397,57 @@ def github_repository_analytics(
             contributors
         )
 
-        commit_analysis = analyze_commits(
-            commits
-        )
-
-        contributor_analysis = analyze_contributors(
-            contributors
-        )
+        commit_analysis = analyze_commits(commits)
+        contributor_analysis = analyze_contributors(contributors)
 
         # -------------------------------------------------
-        # Response
+        # Build response — identical contract as before
         # -------------------------------------------------
 
-        return jsonify({
+        repo = evidence["repository"]
+
+        result = {
             "repository": {
                 "name": repo.get("name"),
-                "full_name": repo.get(
-                    "full_name"
-                ),
-                "description": repo.get(
-                    "description"
-                ),
-                "language": repo.get(
-                    "language"
-                ),
-                "topics": repo.get(
-                    "topics",
-                    []
-                ),
-                "stars": repo.get(
-                    "stargazers_count"
-                ),
-                "forks": repo.get(
-                    "forks_count"
-                ),
-                "open_issues": repo.get(
-                    "open_issues_count"
-                ),
-                "watchers": repo.get(
-                    "watchers_count"
-                ),
-                "created_at": repo.get(
-                    "created_at"
-                ),
-                "updated_at": repo.get(
-                    "updated_at"
-                ),
-                "default_branch": repo.get(
-                    "default_branch"
-                ),
-                "html_url": repo.get(
-                    "html_url"
-                )
+                "full_name": repo.get("full_name"),
+                "description": repo.get("description"),
+                "language": repo.get("language"),
+                "topics": repo.get("topics", []),
+                "stars": repo.get("stars"),
+                "forks": repo.get("forks"),
+                "open_issues": repo.get("open_issues"),
+                "watchers": repo.get("watchers"),
+                "created_at": repo.get("created_at"),
+                "updated_at": repo.get("updated_at"),
+                "default_branch": repo.get("default_branch"),
+                "html_url": repo.get("html_url"),
             },
 
             "health": health,
 
             "activity": {
                 "commits": commit_analysis,
-                "contributors": contributor_analysis
+                "contributors": contributor_analysis,
             },
 
             "evidence": {
-                "structure": evidence.get(
-                    "structure",
-                    {}
-                ),
-                "important_files": evidence.get(
-                    "important_files",
-                    {}
-                ),
-                "workflows": evidence.get(
-                    "workflows",
-                    []
-                ),
-                "repository_flags": evidence.get(
-                    "repository_flags",
-                    {}
-                )
-            }
-        })
+                "structure": evidence.get("structure", {}),
+                "important_files": evidence.get("important_files", {}),
+                "workflows": evidence.get("workflows", []),
+                "repository_flags": evidence.get("repository_flags", {}),
+            },
+        }
+
+        # Store the complete result in the outer cache (1-hour TTL).
+        _cache.set_analysis(owner, repository, result)
+
+        return jsonify(result)
+
+    except RuntimeError as error:
+        # Rate-limit errors from the async client
+        return jsonify({
+            "error": str(error)
+        }), 429
 
     except Exception as error:
         return jsonify({
