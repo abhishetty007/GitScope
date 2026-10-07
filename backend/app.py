@@ -15,7 +15,8 @@ from services.github_service import (
     get_repository,
     get_repository_commits,
     get_repository_contributors,
-    get_repository_evidence
+    get_repository_evidence,
+    _MAX_ANALYSIS_SECONDS,
 )
 
 from services.github_async_client import collect_evidence
@@ -28,7 +29,8 @@ from services.analytics_service import (
 )
 
 import cache as _cache
-from runtime_config import cors_origins, debug_enabled, validate_runtime_config
+from runtime_config import bounded_integer, cors_origins, debug_enabled, validate_runtime_config
+from rate_limit import FixedWindowRateLimiter
 
 
 validate_runtime_config()
@@ -37,6 +39,20 @@ app = Flask(__name__)
 _cors_origins = cors_origins()
 if _cors_origins:
     CORS(app, resources={r"/api/*": {"origins": _cors_origins}})
+
+_public_analytics_limiter = FixedWindowRateLimiter(
+    bounded_integer(os.environ, "GITSCOPE_PUBLIC_ANALYTICS_LIMIT_PER_MINUTE", 60, 1, 10000)
+)
+
+
+def _public_analytics_rate_limit(bucket):
+    allowed, retry_after = _public_analytics_limiter.allow(bucket)
+    if allowed:
+        return None
+    response = jsonify({"error": "Too many analytics requests. Try again later."})
+    response.status_code = 429
+    response.headers["Retry-After"] = str(retry_after)
+    return response
 
 
 def _log_exception(error, level=logging.ERROR):
@@ -203,6 +219,9 @@ def github_repositories(username):
 
 @app.route("/api/github/user/<username>/analytics")
 def github_analytics(username):
+    limited = _public_analytics_rate_limit("user")
+    if limited:
+        return limited
     try:
         repositories = get_user_repositories(
             username
@@ -414,6 +433,9 @@ def github_repository_evidence(
     owner,
     repository
 ):
+    limited = _public_analytics_rate_limit("repository")
+    if limited:
+        return limited
     try:
         evidence = get_repository_evidence(
             owner,
@@ -442,6 +464,10 @@ def github_repository_analytics(
     owner,
     repository
 ):
+    limited = _public_analytics_rate_limit("repository")
+    if limited:
+        return limited
+    analysis_started = time.monotonic()
     try:
         # Always confirm current visibility before serving a cached public
         # analysis. Refresh the shared metadata entry so a cache miss can
@@ -478,7 +504,10 @@ def github_repository_analytics(
         # requests within the TTL window.
         # -------------------------------------------------
 
-        evidence = collect_evidence(owner, repository)
+        remaining_seconds = _MAX_ANALYSIS_SECONDS - (time.monotonic() - analysis_started)
+        if remaining_seconds <= 0:
+            raise TimeoutError("GitHub analysis deadline exceeded")
+        evidence = collect_evidence(owner, repository, timeout_seconds=remaining_seconds)
 
         if evidence is None:
             return jsonify({

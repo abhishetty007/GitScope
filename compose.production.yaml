@@ -7,7 +7,12 @@ services:
     environment:
       GITSCOPE_ENV: production
       GITSCOPE_CORS_ORIGINS: ""
+      GITSCOPE_GITHUB_MAX_PAGES: ${GITSCOPE_GITHUB_MAX_PAGES:-10}
+      GITSCOPE_GITHUB_MAX_FILE_FETCHES: ${GITSCOPE_GITHUB_MAX_FILE_FETCHES:-100}
+      GITSCOPE_ANALYSIS_TIMEOUT_SECONDS: ${GITSCOPE_ANALYSIS_TIMEOUT_SECONDS:-45}
+      GITSCOPE_PUBLIC_ANALYTICS_LIMIT_PER_MINUTE: ${GITSCOPE_PUBLIC_ANALYTICS_LIMIT_PER_MINUTE:-60}
     ports: !reset []
+    stop_grace_period: 35s
 
   frontend:
     environment:
@@ -27,6 +32,12 @@ services:
       !override
       backend:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
 
   migrator:
     profiles: ["release"]

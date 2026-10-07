@@ -35,8 +35,10 @@ also sets `GITSCOPE_ENV=production`, disables Flask CORS, and removes Flask's
 host-published port. Keep Flask reachable only over the private Compose network
 from Next.js; the browser calls Next.js and never calls Flask directly.
 
-Set `GITSCOPE_SITE_URL` before building to the deployed frontend origin,
-including its scheme and host. At runtime provide a managed PostgreSQL
+Set `GITSCOPE_SITE_URL` before building to the deployed frontend HTTPS origin.
+Production `APP_BASE_URL` must also use HTTPS; local HTTP URLs remain supported.
+The Auth0 SDK requires `AUTH0_SECRET` to be exactly 32 bytes encoded as 64
+hexadecimal characters. At runtime provide a managed PostgreSQL
 `DATABASE_URL` with `sslmode=require` (or a stronger provider-supported TLS
 mode),
 `GITSCOPE_API_BASE_URL`, `APP_BASE_URL`, `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`,
@@ -53,6 +55,28 @@ for the deployment. Size the pool against the maximum number of app instances
 and the managed database's connection limit, leaving room for migrations and
 operations. The current defaults are conservative starting points, not a
 provider capacity guarantee.
+
+The Flask public analytics endpoints use a process-local fixed-window limit,
+configured with `GITSCOPE_PUBLIC_ANALYTICS_LIMIT_PER_MINUTE` (default `60` per
+worker). Its memory is bounded and it returns a safe 429 with `Retry-After`.
+This is an application backstop only: it is not shared across Gunicorn workers
+or replicas and does not replace distributed ingress protection. GitHub
+collection is bounded by `GITSCOPE_ANALYSIS_TIMEOUT_SECONDS` (default `45`,
+maximum `55`), `GITSCOPE_GITHUB_MAX_PAGES` (default `10`), and
+`GITSCOPE_GITHUB_MAX_FILE_FETCHES` (default `100`). Reaching a page/deadline
+limit fails safely instead of scoring a silently truncated commit history.
+
+Authenticated JSON mutations reject bodies larger than 4 KiB before JSON
+parsing. `GET /api/health` is the liveness check and does not depend on external
+services. `GET /api/ready` performs a PostgreSQL query with a one-second bound;
+the production Compose frontend healthcheck uses readiness. GitHub is not a
+readiness dependency. The backend allows 60 seconds for a worker request and 30
+seconds for graceful worker shutdown; Compose grants the container 35 seconds
+to stop.
+
+The frontend Dockerfile's default target is the production Next.js runner.
+Build `--target migrator` only for the one-off migration service; migrations
+remain outside normal frontend startup.
 
 Build with `npm run build` and run the Node server with `npm start`. Because
 public analytics pages are server-rendered, deploy the frontend to a Node-capable

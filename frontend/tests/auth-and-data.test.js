@@ -11,6 +11,7 @@ import { safeErrorMessage } from "../src/lib/safe-error-message.js";
 import { assertProductionConfig, productionConfigErrors } from "../src/lib/runtime-config.js";
 import { getDatabasePoolOptions } from "../src/lib/database-pool-config.js";
 import { getMigrationDatabaseUrl } from "../src/lib/migration-database-url.js";
+import { databaseReadinessResponse, isDatabaseReady } from "../src/lib/database-readiness.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -54,7 +55,7 @@ test("production config rejects the local database fallback but local config sta
     AUTH0_DOMAIN: "tenant.example",
     AUTH0_CLIENT_ID: "client-id",
     AUTH0_CLIENT_SECRET: "client-secret",
-    AUTH0_SECRET: "auth-secret",
+    AUTH0_SECRET: "a".repeat(64),
   };
   assert.ok(productionConfigErrors(base).some((name) => name.startsWith("DATABASE_URL")));
   assert.deepEqual(productionConfigErrors({ NODE_ENV: "production" }), []);
@@ -71,13 +72,117 @@ test("production database URL requires explicit TLS", () => {
     AUTH0_DOMAIN: "tenant.example",
     AUTH0_CLIENT_ID: "client-id",
     AUTH0_CLIENT_SECRET: "client-secret",
-    AUTH0_SECRET: "auth-secret",
+    AUTH0_SECRET: "a".repeat(64),
   };
   assert.ok(productionConfigErrors(config).some((name) => name.includes("TLS")));
   assert.deepEqual(productionConfigErrors({
     ...config,
     DATABASE_URL: `${config.DATABASE_URL}?sslmode=require`,
   }), []);
+});
+
+test("production public origins require HTTPS while private Flask may use HTTP", () => {
+  const config = {
+    GITSCOPE_ENV: "production",
+    DATABASE_URL: "postgresql://app:secret@db:5432/gitscope?sslmode=require",
+    GITSCOPE_API_BASE_URL: "http://backend:5000",
+    GITSCOPE_SITE_URL: "https://gitscope.example",
+    APP_BASE_URL: "https://gitscope.example",
+    AUTH0_DOMAIN: "tenant.example",
+    AUTH0_CLIENT_ID: "client-id",
+    AUTH0_CLIENT_SECRET: "client-secret",
+    AUTH0_SECRET: "b".repeat(64),
+  };
+  assert.deepEqual(productionConfigErrors(config), []);
+  assert.ok(productionConfigErrors({ ...config, APP_BASE_URL: "http://gitscope.example" }).includes("APP_BASE_URL"));
+  assert.ok(productionConfigErrors({ ...config, GITSCOPE_SITE_URL: "http://gitscope.example" }).includes("GITSCOPE_SITE_URL"));
+  assert.deepEqual(productionConfigErrors({ ...config, GITSCOPE_ENV: "development", APP_BASE_URL: "http://localhost:3000", GITSCOPE_SITE_URL: "http://localhost:3000" }), []);
+});
+
+test("production Auth0 secret must be a 32-byte hex value and local config stays unrestricted", () => {
+  const config = {
+    GITSCOPE_ENV: "production",
+    DATABASE_URL: "postgresql://app:secret@db:5432/gitscope?sslmode=require",
+    GITSCOPE_API_BASE_URL: "http://backend:5000",
+    GITSCOPE_SITE_URL: "https://gitscope.example",
+    APP_BASE_URL: "https://gitscope.example",
+    AUTH0_DOMAIN: "tenant.example",
+    AUTH0_CLIENT_ID: "client-id",
+    AUTH0_CLIENT_SECRET: "client-secret",
+    AUTH0_SECRET: "c".repeat(64),
+  };
+  assert.deepEqual(productionConfigErrors(config), []);
+  for (const secret of ["", "replace-with-32-byte-hex-secret", "z".repeat(64), "d".repeat(62)]) {
+    assert.ok(productionConfigErrors({ ...config, AUTH0_SECRET: secret }).some((name) => name.startsWith("AUTH0_SECRET")));
+  }
+  assert.deepEqual(productionConfigErrors({ AUTH0_SECRET: "local-short-secret" }), []);
+});
+
+test("database readiness returns safe results and enforces a short timeout", async () => {
+  assert.equal(await isDatabaseReady(async () => 1), true);
+  assert.equal(await isDatabaseReady(async () => { throw new Error("private database details"); }), false);
+  let settleTimedOutProbe;
+  const timedOutProbe = isDatabaseReady(
+    () => new Promise((resolve) => { settleTimedOutProbe = resolve; }),
+    5,
+  );
+  assert.equal(await timedOutProbe, false);
+  settleTimedOutProbe(1);
+  await Promise.resolve();
+  const healthy = await databaseReadinessResponse(async () => 1);
+  assert.equal(healthy.status, 200);
+  assert.deepEqual(await healthy.json(), { status: "ready" });
+  const unavailable = await databaseReadinessResponse(async () => { throw new Error("private database details"); });
+  assert.equal(unavailable.status, 503);
+  const unavailableBody = await unavailable.text();
+  assert.deepEqual(JSON.parse(unavailableBody), { status: "not_ready" });
+  assert.doesNotMatch(unavailableBody, /private database details/);
+});
+
+test("timed-out readiness callers share one probe and allow a new probe after it settles", async () => {
+  let queryCount = 0;
+  let settleProbe;
+  const stalledQuery = () => {
+    queryCount += 1;
+    return new Promise((resolve) => { settleProbe = resolve; });
+  };
+
+  const first = isDatabaseReady(stalledQuery, 15);
+  await Promise.resolve(); // Let the first query start before the second caller arrives.
+  const second = isDatabaseReady(stalledQuery, 15);
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult, false);
+  assert.equal(secondResult, false);
+  assert.equal(queryCount, 1);
+
+  settleProbe(1);
+  await new Promise((resolve) => setImmediate(resolve)); // Allow shared-flight cleanup to run.
+  assert.equal(await isDatabaseReady(async () => {
+    queryCount += 1;
+    return 1;
+  }, 15), true);
+  assert.equal(queryCount, 2);
+});
+
+test("frontend Docker default stage is runner and migrator remains an explicit target", async () => {
+  const dockerfile = await readFile(path.join(root, "Dockerfile"), "utf8");
+  const localCompose = await readFile(path.resolve(root, "..", "compose.yaml"), "utf8");
+  const productionCompose = await readFile(path.resolve(root, "..", "compose.production.yaml"), "utf8");
+  const stages = [...dockerfile.matchAll(/^FROM\s+.+?\s+AS\s+(\w+)\s*$/gm)].map((match) => match[1]);
+  assert.equal(stages.at(-1), "runner");
+  assert.ok(stages.includes("migrator"));
+  assert.match(dockerfile, /FROM dependencies AS migrator[\s\S]*?CMD \["npm", "run", "db:migrate:deploy"\][\s\S]*?FROM node:22-bookworm-slim AS runner/);
+  const frontendService = (compose) => compose.match(/^  frontend:\n([\s\S]*?)(?=^  [a-zA-Z_][a-zA-Z0-9_-]*:|^volumes:)/m)?.[1] ?? "";
+  assert.match(frontendService(localCompose), /context: \.\/frontend/);
+  assert.doesNotMatch(frontendService(localCompose), /target:/);
+  assert.doesNotMatch(frontendService(productionCompose), /target:/);
+  assert.match(productionCompose, /migrator:[\s\S]*?target: migrator/);
+});
+
+test("production Compose uses DB readiness and grants backend graceful shutdown time", async () => {
+  const productionCompose = await readFile(path.resolve(root, "..", "compose.production.yaml"), "utf8");
+  assert.match(productionCompose, /\/api\/ready/);
+  assert.match(productionCompose, /stop_grace_period:\s*35s/);
 });
 
 test("Prisma pg pool settings are explicit, configurable, and bounded", () => {
@@ -206,6 +311,25 @@ test("malformed JSON mutation bodies return a client error", async () => {
     body: "{",
   });
   assert.equal((await handlers.saveHandler(request)).status, 400);
+});
+
+test("oversized save and track bodies are rejected before mutation work", async () => {
+  let writes = 0;
+  const handlers = makeHandlers({
+    saveAnalysisForUser: async () => { writes += 1; },
+    trackPublicRepository: async () => { writes += 1; },
+  });
+  const oversized = "x".repeat(8192);
+  const requests = ["saved-analyses", "tracked-repositories"].map((path) => new Request(
+    `https://gitscope.example/api/${path}`,
+    { method: "POST", headers: { origin: "https://gitscope.example", "content-type": "application/json" }, body: oversized },
+  ));
+  const responses = [await handlers.saveHandler(requests[0]), await handlers.trackHandler(requests[1])];
+  for (const response of responses) {
+    assert.equal(response.status, 413);
+    assert.deepEqual(await response.json(), { error: "Request body is too large" });
+  }
+  assert.equal(writes, 0);
 });
 
 test("saved-analysis read and delete operations are scoped to the session user", async () => {

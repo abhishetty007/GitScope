@@ -1,7 +1,9 @@
 import os
+import time
 
 import requests
 from dotenv import load_dotenv
+from runtime_config import bounded_integer
 
 
 load_dotenv(
@@ -15,6 +17,24 @@ load_dotenv(
 GITHUB_API_URL = "https://api.github.com"
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+_MAX_GITHUB_PAGES = bounded_integer(os.environ, "GITSCOPE_GITHUB_MAX_PAGES", 10, 1, 100)
+_MAX_ANALYSIS_SECONDS = bounded_integer(os.environ, "GITSCOPE_ANALYSIS_TIMEOUT_SECONDS", 45, 5, 55)
+_MAX_FILE_FETCHES = bounded_integer(os.environ, "GITSCOPE_GITHUB_MAX_FILE_FETCHES", 100, 1, 500)
+
+
+class GitHubCollectionLimitError(Exception):
+    """A safe hard bound was reached while collecting public GitHub data."""
+
+
+def _check_collection_deadline(started):
+    if time.monotonic() - started >= _MAX_ANALYSIS_SECONDS:
+        raise TimeoutError("GitHub collection deadline exceeded")
+
+
+def bounded_evidence_paths(important_paths, workflow_paths):
+    important = sorted(set(important_paths))
+    workflows = sorted(set(workflow_paths) - set(important))
+    return (important + workflows)[:_MAX_FILE_FETCHES]
 
 
 def github_get(endpoint, params=None):
@@ -57,9 +77,10 @@ def get_user_repositories(username):
     endpoint = f"/users/{username}/repos"
 
     repositories = []
-    page = 1
+    started = time.monotonic()
 
-    while True:
+    for page in range(1, _MAX_GITHUB_PAGES + 1):
+        _check_collection_deadline(started)
         params = {
             "per_page": 100,
             "page": page,
@@ -75,16 +96,14 @@ def get_user_repositories(username):
             return None
 
         if not page_data:
-            break
+            return repositories
 
         repositories.extend(page_data)
 
         if len(page_data) < 100:
-            break
+            return repositories
 
-        page += 1
-
-    return repositories
+    raise GitHubCollectionLimitError("GitHub repository page limit reached")
 
 
 def get_repository(owner, repository):
@@ -103,9 +122,10 @@ def get_repository_commits(owner, repository):
     )
 
     commits = []
-    page = 1
+    started = time.monotonic()
 
-    while True:
+    for page in range(1, _MAX_GITHUB_PAGES + 1):
+        _check_collection_deadline(started)
         params = {
             "per_page": 100,
             "page": page
@@ -120,16 +140,14 @@ def get_repository_commits(owner, repository):
             return None
 
         if not page_data:
-            break
+            return commits
 
         commits.extend(page_data)
 
         if len(page_data) < 100:
-            break
+            return commits
 
-        page += 1
-
-    return commits
+    raise GitHubCollectionLimitError("GitHub commit page limit reached")
 
 
 def get_repository_contributors(owner, repository):
@@ -138,9 +156,10 @@ def get_repository_contributors(owner, repository):
     )
 
     contributors = []
-    page = 1
+    started = time.monotonic()
 
-    while True:
+    for page in range(1, _MAX_GITHUB_PAGES + 1):
+        _check_collection_deadline(started)
         params = {
             "per_page": 100,
             "page": page
@@ -155,16 +174,14 @@ def get_repository_contributors(owner, repository):
             return None
 
         if not page_data:
-            break
+            return contributors
 
         contributors.extend(page_data)
 
         if len(page_data) < 100:
-            break
+            return contributors
 
-        page += 1
-
-    return contributors
+    raise GitHubCollectionLimitError("GitHub contributor page limit reached")
 
 
 # ---------------------------------------------------------
@@ -308,11 +325,9 @@ def _classify_path(path):
     return "other"
 
 
-def get_repository_tree(owner, repository, branch=None):
-    repo = get_repository(
-        owner,
-        repository
-    )
+def get_repository_tree(owner, repository, branch=None, repo=None):
+    if repo is None:
+        repo = get_repository(owner, repository)
 
     if repo is None:
         return None
@@ -436,7 +451,9 @@ def get_repository_evidence(owner, repository, repo=None):
         eliminating a redundant GitHub API request.
     """
 
+    collection_started = time.monotonic()
     if repo is None:
+        _check_collection_deadline(collection_started)
         repo = get_repository(
             owner,
             repository
@@ -450,10 +467,12 @@ def get_repository_evidence(owner, repository, repo=None):
         "main"
     )
 
+    _check_collection_deadline(collection_started)
     tree = get_repository_tree(
         owner,
         repository,
-        default_branch
+        default_branch,
+        repo=repo,
     )
 
     if tree is None:
@@ -525,17 +544,12 @@ def get_repository_evidence(owner, repository, repo=None):
     # We deliberately do NOT download the entire repository.
     # -----------------------------------------------------
 
-    files_to_read = set(
-        detected_files.values()
-    )
-
-    files_to_read.update(
-        workflow_files
-    )
+    files_to_read = bounded_evidence_paths(detected_files.values(), workflow_files)
 
     file_contents = {}
 
     for path in files_to_read:
+        _check_collection_deadline(collection_started)
         file_data = get_repository_file(
             owner,
             repository,

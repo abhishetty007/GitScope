@@ -24,6 +24,10 @@ export function productionConfigErrors(env = process.env) {
     if (env[name]?.includes(placeholder)) errors.push(name);
   }
 
+  if (env.AUTH0_SECRET?.trim() && !/^[a-fA-F0-9]{64}$/.test(env.AUTH0_SECRET)) {
+    errors.push("AUTH0_SECRET (must be 32-byte hex)");
+  }
+
   if (env.DATABASE_URL?.trim()) {
     try {
       const databaseUrl = new URL(env.DATABASE_URL);
@@ -49,7 +53,9 @@ export function productionConfigErrors(env = process.env) {
     if (!env[name]?.trim()) continue;
     try {
       const value = new URL(env[name]);
-      if (!["http:", "https:"].includes(value.protocol) || value.username || value.password) {
+      const requiresHttps = name === "APP_BASE_URL" || name === "GITSCOPE_SITE_URL";
+      if (!["http:", "https:"].includes(value.protocol) || value.username || value.password ||
+          (requiresHttps && value.protocol !== "https:")) {
         errors.push(name);
       }
     } catch {

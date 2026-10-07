@@ -58,6 +58,10 @@ load_dotenv(os.path.join(_BACKEND_DIR, ".env"))
 
 from services.github_service import (  # noqa: E402
     IMPORTANT_FILES,
+    GitHubCollectionLimitError,
+    _MAX_ANALYSIS_SECONDS,
+    _MAX_GITHUB_PAGES,
+    bounded_evidence_paths,
     _classify_path,
     _is_test_path,
     _is_source_file,
@@ -173,8 +177,7 @@ async def _async_get_all_pages(
     per_page: int = 100,
 ) -> list | None:
     results = []
-    page = 1
-    while True:
+    for page in range(1, _MAX_GITHUB_PAGES + 1):
         page_data = await _async_get(
             client,
             endpoint,
@@ -183,12 +186,11 @@ async def _async_get_all_pages(
         if page_data is None:
             return None
         if not page_data:
-            break
+            return results
         results.extend(page_data)
         if len(page_data) < per_page:
-            break
-        page += 1
-    return results
+            return results
+    raise GitHubCollectionLimitError("GitHub collection page limit reached")
 
 
 # -----------------------------------------------------------------
@@ -242,7 +244,7 @@ async def _fetch_file(
 # Main async evidence collector
 # -----------------------------------------------------------------
 
-async def _collect_evidence_async(owner: str, repository: str) -> dict | None:
+async def _collect_evidence_async_impl(owner: str, repository: str) -> dict | None:
     """
     Collect all evidence for one repository using a single AsyncClient.
 
@@ -326,7 +328,7 @@ async def _collect_evidence_async(owner: str, repository: str) -> dict | None:
         documentation_files = [f["path"] for f in files if f["category"] == "documentation"]
 
         # Files whose content we want to download
-        files_to_read = set(detected_files.values()) | set(workflow_files)
+        files_to_read = bounded_evidence_paths(detected_files.values(), workflow_files)
 
         # ----------------------------------------------------------
         # Stage 3: concurrent fetches
@@ -423,6 +425,9 @@ async def _collect_evidence_async(owner: str, repository: str) -> dict | None:
         # unavailable evidence and do not fail repository analysis.
         if isinstance(workflow_runs_result, RuntimeError):
             raise workflow_runs_result
+        for result in (commits_result, contributors_result):
+            if isinstance(result, (GitHubCollectionLimitError, TimeoutError)):
+                raise result
 
         # Build file_contents dict, skipping any failed fetches
         file_contents: dict[str, str] = {}
@@ -515,11 +520,30 @@ async def _collect_evidence_async(owner: str, repository: str) -> dict | None:
     return evidence
 
 
+async def _collect_evidence_async(
+    owner: str,
+    repository: str,
+    timeout_seconds: float | None = None,
+) -> dict | None:
+    try:
+        timeout = _MAX_ANALYSIS_SECONDS if timeout_seconds is None else min(
+            _MAX_ANALYSIS_SECONDS, max(0.001, timeout_seconds)
+        )
+        async with asyncio.timeout(timeout):
+            return await _collect_evidence_async_impl(owner, repository)
+    except TimeoutError as error:
+        raise TimeoutError("GitHub analysis deadline exceeded") from error
+
+
 # -----------------------------------------------------------------
 # Public sync wrapper — called from Flask (synchronous context)
 # -----------------------------------------------------------------
 
-def collect_evidence(owner: str, repository: str) -> dict | None:
+def collect_evidence(
+    owner: str,
+    repository: str,
+    timeout_seconds: float | None = None,
+) -> dict | None:
     """
     Synchronous entry point for Flask route handlers.
 
@@ -537,4 +561,4 @@ def collect_evidence(owner: str, repository: str) -> dict | None:
 
     Returns None if the repository does not exist.
     """
-    return asyncio.run(_collect_evidence_async(owner, repository))
+    return asyncio.run(_collect_evidence_async(owner, repository, timeout_seconds))

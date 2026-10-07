@@ -3,9 +3,35 @@ const safeErrorStatus = (error) =>
   error?.status === 404 ? 404 : error?.status === 429 ? 429 : 502;
 const validSlug = (value, max) =>
   typeof value === "string" && value.length <= max && /^[A-Za-z0-9_.-]+$/.test(value);
+const MAX_JSON_BODY_BYTES = 4096;
 const readInput = async (request) => {
+  const declaredLength = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_JSON_BODY_BYTES) {
+    return { tooLarge: true };
+  }
+  if (!request.body) return { error: true };
+
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
   try {
-    return { value: await request.json() };
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_JSON_BODY_BYTES) {
+        await reader.cancel();
+        return { tooLarge: true };
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return { value: JSON.parse(new TextDecoder().decode(bytes)) };
   } catch {
     return { error: true };
   }
@@ -44,6 +70,7 @@ export function createProtectedHandlers(dependencies = {}) {
       const user = await authenticated();
       if (!user) return json({ error: "Authentication required" }, 401);
       const parsed = await readInput(request);
+      if (parsed.tooLarge) return json({ error: "Request body is too large" }, 413);
       if (parsed.error) return json({ error: "Request body must be valid JSON" }, 400);
       const input = parsed.value;
       if (!validSlug(input?.owner, 39) || !validSlug(input?.repository, 100)) {
@@ -112,6 +139,7 @@ export function createProtectedHandlers(dependencies = {}) {
       const user = await authenticated();
       if (!user) return json({ error: "Authentication required" }, 401);
       const parsed = await readInput(request);
+      if (parsed.tooLarge) return json({ error: "Request body is too large" }, 413);
       if (parsed.error) return json({ error: "Request body must be valid JSON" }, 400);
       const input = parsed.value;
       if (!validSlug(input?.owner, 39) || !validSlug(input?.repository, 100)) {

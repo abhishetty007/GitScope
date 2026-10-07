@@ -199,7 +199,9 @@ class TestPhase3ApiContract(unittest.TestCase):
                 "/api/github/repository/alice/repo/analytics"
             )
         self.assertEqual(response.status_code, 200)
-        collect.assert_called_once_with("alice", "repo")
+        collect.assert_called_once()
+        self.assertEqual(collect.call_args.args, ("alice", "repo"))
+        self.assertGreater(collect.call_args.kwargs["timeout_seconds"], 0)
         self.assertEqual(
             app_cache.get_raw(app_cache.repo_key("alice", "repo")),
             {"private": False},
