@@ -27,17 +27,20 @@ commit lists, contributor lists, and OAuth tokens are not persisted.
 
 ## Production configuration
 
-Set `GITSCOPE_API_BASE_URL` in the Next.js server environment to the reachable
-Flask API origin. Set `GITSCOPE_SITE_URL` before building to the deployed
-frontend origin, including its scheme and host (using the value supplied by the
-hosting environment). The API URL is read server-side and is not exposed as a
-browser configuration value. Do not put credentials in either variable.
+Use `compose.production.yaml` with the local `compose.yaml` when deploying this
+Compose configuration. It sets `GITSCOPE_ENV=production`, requires production
+configuration, disables Flask CORS, and removes Flask's host-published port.
+Keep Flask reachable only over the private Compose network from Next.js; the
+browser calls Next.js and never calls Flask directly.
 
-Set `DATABASE_URL`, `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET`,
-`AUTH0_SECRET`, `AUTH0_ISSUER`, and `APP_BASE_URL` in the frontend server
-environment. Configure the Flask `GITSCOPE_CORS_ORIGINS` allowlist only for
-browser clients that call Flask directly; server-to-server Next.js calls do not
-use CORS. Flask CORS is not an authorization mechanism.
+Set `GITSCOPE_SITE_URL` before building to the deployed frontend origin,
+including its scheme and host. At runtime provide `DATABASE_URL`,
+`GITSCOPE_API_BASE_URL`, `APP_BASE_URL`, `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`,
+`AUTH0_CLIENT_SECRET`, and `AUTH0_SECRET`. `AUTH0_ISSUER` is optional; when
+omitted, GitScope derives it from `AUTH0_DOMAIN`. The API URL is read
+server-side and is not exposed as browser configuration. Do not put credentials
+in build arguments or images. Supply secrets through the deployment runtime
+configuration, not the local `.env.example` defaults.
 
 Build with `npm run build` and run the Node server with `npm start`. Because
 public analytics pages are server-rendered, deploy the frontend to a Node-capable

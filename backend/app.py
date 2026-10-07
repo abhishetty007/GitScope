@@ -1,7 +1,13 @@
-from flask import Flask, jsonify
+from flask import Flask, g, jsonify, request
+import logging
 import os
+import sys
+import time
+import traceback
+import uuid
 
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 
 from services.github_service import (
     get_user,
@@ -22,20 +28,68 @@ from services.analytics_service import (
 )
 
 import cache as _cache
+from runtime_config import cors_origins, debug_enabled, validate_runtime_config
 
 
+validate_runtime_config()
 app = Flask(__name__)
 
-_cors_origins = [
-    origin.strip()
-    for origin in os.getenv(
-        "GITSCOPE_CORS_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000",
-    ).split(",")
-    if origin.strip()
-]
+_cors_origins = cors_origins()
 if _cors_origins:
     CORS(app, resources={r"/api/*": {"origins": _cors_origins}})
+
+
+def _log_exception(error, level=logging.ERROR):
+    request_id = getattr(g, "request_id", "unavailable")
+    # Keep actionable frames and exception type, but never format arbitrary
+    # exception text, which can contain upstream response or request data.
+    frames = "".join(traceback.format_list(traceback.extract_tb(error.__traceback__)))
+    app.logger.log(
+        level,
+        "request_failure request_id=%s exception_type=%s stack=%s",
+        request_id,
+        type(error).__name__,
+        frames,
+    )
+
+
+def _internal_server_error(error=None):
+    if error is None:
+        error = sys.exc_info()[1]
+    if error is not None:
+        _log_exception(error)
+    return jsonify({"error": "Internal server error"}), 500
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected_exception(error):
+    if isinstance(error, HTTPException):
+        return error
+    return _internal_server_error(error)
+
+
+@app.before_request
+def _start_request_context():
+    g.request_id = str(uuid.uuid4())
+    g.request_started_at = time.perf_counter()
+
+
+@app.after_request
+def _finish_request(response):
+    request_id = getattr(g, "request_id", None)
+    if request_id:
+        response.headers["X-Request-ID"] = request_id
+        duration_ms = (time.perf_counter() - g.request_started_at) * 1000
+        route = request.url_rule.rule if request.url_rule else "unmatched"
+        app.logger.info(
+            "request_complete request_id=%s method=%s route=%s status=%s duration_ms=%.2f",
+            request_id,
+            request.method,
+            route,
+            response.status_code,
+            duration_ms,
+        )
+    return response
 
 
 # =========================================================
@@ -81,10 +135,8 @@ def github_user(username):
             "html_url": user.get("html_url")
         })
 
-    except Exception as error:
-        return jsonify({
-            "error": str(error)
-        }), 500
+    except Exception:
+        return _internal_server_error()
 
 
 # =========================================================
@@ -141,10 +193,8 @@ def github_repositories(username):
 
         return jsonify(result)
 
-    except Exception as error:
-        return jsonify({
-            "error": str(error)
-        }), 500
+    except Exception:
+        return _internal_server_error()
 
 
 # =========================================================
@@ -174,10 +224,8 @@ def github_analytics(username):
 
         return jsonify(analytics)
 
-    except Exception as error:
-        return jsonify({
-            "error": str(error)
-        }), 500
+    except Exception:
+        return _internal_server_error()
 
 
 # =========================================================
@@ -234,10 +282,8 @@ def github_repository(owner, repository):
             )
         })
 
-    except Exception as error:
-        return jsonify({
-            "error": str(error)
-        }), 500
+    except Exception:
+        return _internal_server_error()
 
 
 @app.route("/api/github/repository/<owner>/<repository>/identity")
@@ -260,8 +306,8 @@ def github_repository_identity(owner, repository):
             "visibility": "public",
             "html_url": repo.get("html_url"),
         })
-    except Exception as error:
-        return jsonify({"error": str(error)}), 500
+    except Exception:
+        return _internal_server_error()
 
 
 # =========================================================
@@ -320,10 +366,8 @@ def github_commits(owner, repository):
 
         return jsonify(result)
 
-    except Exception as error:
-        return jsonify({
-            "error": str(error)
-        }), 500
+    except Exception:
+        return _internal_server_error()
 
 
 # =========================================================
@@ -355,10 +399,8 @@ def github_contributors(owner, repository):
             )
         )
 
-    except Exception as error:
-        return jsonify({
-            "error": str(error)
-        }), 500
+    except Exception:
+        return _internal_server_error()
 
 
 # =========================================================
@@ -385,10 +427,8 @@ def github_repository_evidence(
 
         return jsonify(evidence)
 
-    except Exception as error:
-        return jsonify({
-            "error": str(error)
-        }), 500
+    except Exception:
+        return _internal_server_error()
 
 
 # =========================================================
@@ -512,15 +552,14 @@ def github_repository_analytics(
         return jsonify(result)
 
     except RuntimeError as error:
-        # Rate-limit errors from the async client
+        # Preserve the intentional status without exposing upstream details.
+        _log_exception(error, logging.WARNING)
         return jsonify({
-            "error": str(error)
+            "error": "GitHub rate limit exceeded. Try again later."
         }), 429
 
-    except Exception as error:
-        return jsonify({
-            "error": str(error)
-        }), 500
+    except Exception:
+        return _internal_server_error()
 
 
 # =========================================================
@@ -531,5 +570,5 @@ if __name__ == "__main__":
     app.run(
         host="127.0.0.1",
         port=5000,
-        debug=True
+        debug=debug_enabled(),
     )

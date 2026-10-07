@@ -7,8 +7,68 @@ import { resolveLocalUser } from "../src/lib/identity.js";
 import { compactAnalysis, analysisSnapshotHash } from "../src/lib/analysis-snapshot.js";
 import { createProtectedHandlers } from "../src/lib/protected-handlers.js";
 import { hasSameOrigin } from "../src/lib/request-security.js";
+import { safeErrorMessage } from "../src/lib/safe-error-message.js";
+import { assertProductionConfig, productionConfigErrors } from "../src/lib/runtime-config.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+test("error boundary message never exposes arbitrary exception details", () => {
+  const secretText = "postgres://user:password@db/internal-token";
+  assert.equal(
+    safeErrorMessage(new Error(secretText)),
+    "This request could not be completed. Please try again.",
+  );
+  assert.equal(safeErrorMessage(new Error(secretText)).includes(secretText), false);
+});
+
+test("Next error boundary renders the safe message helper and retains retry", async () => {
+  const boundary = await readFile(path.join(root, "app", "error.jsx"), "utf8");
+  assert.match(boundary, /safeErrorMessage\(error\)/);
+  assert.doesNotMatch(boundary, /error\?\.message/);
+  assert.match(boundary, /onClick=\{reset\}/);
+});
+
+test("production configuration reports missing setting names without values", () => {
+  const errors = productionConfigErrors({
+    GITSCOPE_ENV: "production",
+    AUTH0_SECRET: "top-secret-value",
+  });
+  assert.ok(errors.includes("DATABASE_URL"));
+  assert.ok(errors.includes("AUTH0_DOMAIN"));
+  assert.equal(errors.join(" ").includes("top-secret-value"), false);
+  assert.throws(
+    () => assertProductionConfig({ GITSCOPE_ENV: "production" }),
+    /DATABASE_URL/,
+  );
+});
+
+test("production config rejects the local database fallback but local config stays optional", () => {
+  const base = {
+    GITSCOPE_ENV: "production",
+    DATABASE_URL: "postgresql://gitscope:local-dev-only@db:5432/gitscope",
+    GITSCOPE_API_BASE_URL: "http://backend:5000",
+    GITSCOPE_SITE_URL: "https://gitscope.example",
+    APP_BASE_URL: "https://gitscope.example",
+    AUTH0_DOMAIN: "tenant.example",
+    AUTH0_CLIENT_ID: "client-id",
+    AUTH0_CLIENT_SECRET: "client-secret",
+    AUTH0_SECRET: "auth-secret",
+  };
+  assert.ok(productionConfigErrors(base).some((name) => name.startsWith("DATABASE_URL")));
+  assert.deepEqual(productionConfigErrors({ NODE_ENV: "production" }), []);
+  assert.deepEqual(productionConfigErrors({}), []);
+});
+
+test("production Compose boundary disables Flask CORS and host port publishing", async () => {
+  const productionCompose = await readFile(
+    path.resolve(root, "..", "compose.production.yaml"),
+    "utf8",
+  );
+  assert.match(productionCompose, /GITSCOPE_CORS_ORIGINS:\s*["']{2}/);
+  assert.match(productionCompose, /ports:\s*!reset\s*\[\]/);
+  assert.match(productionCompose, /DATABASE_URL:\s*\$\{DATABASE_URL:\?Set DATABASE_URL\}/);
+  assert.match(productionCompose, /GITSCOPE_ENV:\s*production/);
+});
 
 function makeRequest(url, method = "GET", body, origin = "https://gitscope.example") {
   return new Request(url, {

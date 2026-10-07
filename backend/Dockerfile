@@ -16,4 +16,4 @@ COPY --chown=gitscope:gitscope . .
 
 USER gitscope
 EXPOSE 5000
-CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:${PORT} --workers ${GUNICORN_WORKERS:-2} --access-logfile - --error-logfile - app:app"]
+CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:${PORT} --workers ${GUNICORN_WORKERS:-2} --access-logfile - --access-logformat '%(h)s %(t)s \"%(m)s %(H)s\" %(s)s %(b)s %(L)s' --error-logfile - app:app"]

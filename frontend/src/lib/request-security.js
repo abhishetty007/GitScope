@@ -1,6 +1,9 @@
 const mutationWindows = new Map();
 
 export function hasSameOrigin(request) {
+  if (process.env.GITSCOPE_ENV === "production" && !process.env.APP_BASE_URL) {
+    return false;
+  }
   const origin = request.headers.get("origin");
   if (!origin) return false;
   try {
