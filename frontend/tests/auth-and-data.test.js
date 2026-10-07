@@ -9,6 +9,8 @@ import { createProtectedHandlers } from "../src/lib/protected-handlers.js";
 import { hasSameOrigin } from "../src/lib/request-security.js";
 import { safeErrorMessage } from "../src/lib/safe-error-message.js";
 import { assertProductionConfig, productionConfigErrors } from "../src/lib/runtime-config.js";
+import { getDatabasePoolOptions } from "../src/lib/database-pool-config.js";
+import { getMigrationDatabaseUrl } from "../src/lib/migration-database-url.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -45,7 +47,7 @@ test("production configuration reports missing setting names without values", ()
 test("production config rejects the local database fallback but local config stays optional", () => {
   const base = {
     GITSCOPE_ENV: "production",
-    DATABASE_URL: "postgresql://gitscope:local-dev-only@db:5432/gitscope",
+    DATABASE_URL: "postgresql://gitscope:local-dev-only@db:5432/gitscope?sslmode=require",
     GITSCOPE_API_BASE_URL: "http://backend:5000",
     GITSCOPE_SITE_URL: "https://gitscope.example",
     APP_BASE_URL: "https://gitscope.example",
@@ -59,6 +61,53 @@ test("production config rejects the local database fallback but local config sta
   assert.deepEqual(productionConfigErrors({}), []);
 });
 
+test("production database URL requires explicit TLS", () => {
+  const config = {
+    GITSCOPE_ENV: "production",
+    DATABASE_URL: "postgresql://app:secret@db:5432/gitscope",
+    GITSCOPE_API_BASE_URL: "http://backend:5000",
+    GITSCOPE_SITE_URL: "https://gitscope.example",
+    APP_BASE_URL: "https://gitscope.example",
+    AUTH0_DOMAIN: "tenant.example",
+    AUTH0_CLIENT_ID: "client-id",
+    AUTH0_CLIENT_SECRET: "client-secret",
+    AUTH0_SECRET: "auth-secret",
+  };
+  assert.ok(productionConfigErrors(config).some((name) => name.includes("TLS")));
+  assert.deepEqual(productionConfigErrors({
+    ...config,
+    DATABASE_URL: `${config.DATABASE_URL}?sslmode=require`,
+  }), []);
+});
+
+test("Prisma pg pool settings are explicit, configurable, and bounded", () => {
+  assert.deepEqual(getDatabasePoolOptions({}), {
+    max: 5,
+    connectionTimeoutMillis: 5000,
+    idleTimeoutMillis: 10000,
+  });
+  assert.deepEqual(getDatabasePoolOptions({
+    GITSCOPE_DB_POOL_MAX: "8",
+    GITSCOPE_DB_CONNECTION_TIMEOUT_MS: "2500",
+  }), {
+    max: 8,
+    connectionTimeoutMillis: 2500,
+    idleTimeoutMillis: 10000,
+  });
+  assert.throws(() => getDatabasePoolOptions({ GITSCOPE_DB_POOL_MAX: "0" }), /GITSCOPE_DB_POOL_MAX/);
+  assert.throws(() => getDatabasePoolOptions({ GITSCOPE_DB_CONNECTION_TIMEOUT_MS: "999999" }), /GITSCOPE_DB_CONNECTION_TIMEOUT_MS/);
+});
+
+test("migration URL prefers explicit direct URL and otherwise uses DATABASE_URL", () => {
+  const runtimeUrl = "postgresql://app:secret@pool:5432/gitscope?sslmode=require";
+  const directUrl = "postgresql://migrator:secret@db:5432/gitscope?sslmode=verify-full";
+  assert.equal(getMigrationDatabaseUrl({ GITSCOPE_ENV: "production", DATABASE_URL: runtimeUrl, DIRECT_URL: directUrl }), directUrl);
+  assert.equal(getMigrationDatabaseUrl({ GITSCOPE_ENV: "production", DATABASE_URL: runtimeUrl }), runtimeUrl);
+  assert.throws(() => getMigrationDatabaseUrl({ GITSCOPE_ENV: "production" }), /require DIRECT_URL or DATABASE_URL/);
+  assert.throws(() => getMigrationDatabaseUrl({ GITSCOPE_ENV: "production", DATABASE_URL: "postgresql://app:secret@db/gitscope" }), /must enforce TLS/);
+  assert.match(getMigrationDatabaseUrl({}), /127\.0\.0\.1:5432/);
+});
+
 test("production Compose boundary disables Flask CORS and host port publishing", async () => {
   const productionCompose = await readFile(
     path.resolve(root, "..", "compose.production.yaml"),
@@ -68,6 +117,27 @@ test("production Compose boundary disables Flask CORS and host port publishing",
   assert.match(productionCompose, /ports:\s*!reset\s*\[\]/);
   assert.match(productionCompose, /DATABASE_URL:\s*\$\{DATABASE_URL:\?Set DATABASE_URL\}/);
   assert.match(productionCompose, /GITSCOPE_ENV:\s*production/);
+  assert.match(productionCompose, /postgres:\s*!reset\s+null/);
+  assert.match(productionCompose, /postgres_data:\s*!reset\s+null/);
+  assert.match(productionCompose, /DIRECT_URL:\s*\$\{DIRECT_URL:-\}/);
+  assert.match(productionCompose, /target:\s*migrator/);
+  assert.match(productionCompose, /profiles:\s*\["release"\]/);
+  assert.doesNotMatch(productionCompose, /POSTGRES_PASSWORD/);
+});
+
+test("production migration image has Prisma files and receives no build-time DB secrets", async () => {
+  const dockerfile = await readFile(path.resolve(root, "Dockerfile"), "utf8");
+  const localCompose = await readFile(path.resolve(root, "..", "compose.yaml"), "utf8");
+  const productionCompose = await readFile(path.resolve(root, "..", "compose.production.yaml"), "utf8");
+  assert.match(dockerfile, /FROM dependencies AS migrator/);
+  assert.match(dockerfile, /COPY prisma \.\/prisma/);
+  assert.match(dockerfile, /COPY prisma7\.config\.ts/);
+  assert.match(dockerfile, /COPY src\/lib\/migration-database-url\.js/);
+  assert.match(dockerfile, /CMD \["npm", "run", "db:migrate:deploy"\]/);
+  assert.doesNotMatch(dockerfile, /ARG\s+(?:DATABASE_URL|DIRECT_URL)/);
+  assert.doesNotMatch(dockerfile, /ENV\s+(?:DATABASE_URL|DIRECT_URL)/);
+  assert.doesNotMatch(localCompose, /args:[\s\S]{0,120}(?:DATABASE_URL|DIRECT_URL)/);
+  assert.doesNotMatch(productionCompose, /args:[\s\S]{0,120}(?:DATABASE_URL|DIRECT_URL)/);
 });
 
 function makeRequest(url, method = "GET", body, origin = "https://gitscope.example") {

@@ -36,3 +36,12 @@ COPY --from=builder --chown=nextjs:nextjs /app/.next/static ./.next/static
 USER nextjs
 EXPOSE 3000
 CMD ["node", "server.js"]
+
+# One-off release target: includes Prisma CLI/config/migrations but is not used
+# by the web service. Database credentials are supplied only when it runs.
+FROM dependencies AS migrator
+WORKDIR /app
+COPY prisma ./prisma
+COPY prisma7.config.ts ./prisma7.config.ts
+COPY src/lib/migration-database-url.js ./src/lib/migration-database-url.js
+CMD ["npm", "run", "db:migrate:deploy"]

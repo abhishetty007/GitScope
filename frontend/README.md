@@ -27,14 +27,18 @@ commit lists, contributor lists, and OAuth tokens are not persisted.
 
 ## Production configuration
 
-Use `compose.production.yaml` with the local `compose.yaml` when deploying this
-Compose configuration. It sets `GITSCOPE_ENV=production`, requires production
-configuration, disables Flask CORS, and removes Flask's host-published port.
-Keep Flask reachable only over the private Compose network from Next.js; the
-browser calls Next.js and never calls Flask directly.
+`compose.yaml` is the local verification configuration and continues to run its
+private PostgreSQL container. For production, combine it with
+`compose.production.yaml`: the production overlay removes the local PostgreSQL
+service and volume and expects an externally managed PostgreSQL database. It
+also sets `GITSCOPE_ENV=production`, disables Flask CORS, and removes Flask's
+host-published port. Keep Flask reachable only over the private Compose network
+from Next.js; the browser calls Next.js and never calls Flask directly.
 
 Set `GITSCOPE_SITE_URL` before building to the deployed frontend origin,
-including its scheme and host. At runtime provide `DATABASE_URL`,
+including its scheme and host. At runtime provide a managed PostgreSQL
+`DATABASE_URL` with `sslmode=require` (or a stronger provider-supported TLS
+mode),
 `GITSCOPE_API_BASE_URL`, `APP_BASE_URL`, `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`,
 `AUTH0_CLIENT_SECRET`, and `AUTH0_SECRET`. `AUTH0_ISSUER` is optional; when
 omitted, GitScope derives it from `AUTH0_DOMAIN`. The API URL is read
@@ -42,16 +46,38 @@ server-side and is not exposed as browser configuration. Do not put credentials
 in build arguments or images. Supply secrets through the deployment runtime
 configuration, not the local `.env.example` defaults.
 
+The Prisma client uses one lazy connection pool per Next.js process. Configure
+`GITSCOPE_DB_POOL_MAX` (default `5`, allowed `1`–`50`) and
+`GITSCOPE_DB_CONNECTION_TIMEOUT_MS` (default `5000`, allowed `100`–`30000`)
+for the deployment. Size the pool against the maximum number of app instances
+and the managed database's connection limit, leaving room for migrations and
+operations. The current defaults are conservative starting points, not a
+provider capacity guarantee.
+
 Build with `npm run build` and run the Node server with `npm start`. Because
 public analytics pages are server-rendered, deploy the frontend to a Node-capable
 Next.js host; static-only hosting is not sufficient. Configure the Flask API's
-production CORS policy for any remaining browser-facing integrations.
+production CORS policy to remain empty; the browser does not call Flask
+directly.
 
-Run `npm run db:migrate:deploy` once as a release step before deploying the new
-app version. Do not run Prisma schema push or migrations from application startup.
-Use a PostgreSQL runtime URL with TLS and backups enabled; keep migration
-credentials separate where the provider supports it. `npm run test` runs the
-frontend's Node-based auth/authorization/snapshot/schema tests.
+Run `prisma migrate deploy` once as a controlled release step before deploying
+the new app version. With Compose, use
+`docker compose -f compose.yaml -f compose.production.yaml run --rm migrator`;
+the `release`-profile migration service is a one-off task and is never started
+by the web service. The migration image contains the Prisma CLI, config, schema,
+and checked-in migrations, and receives database credentials only at runtime.
+Set optional `DIRECT_URL` only when the provider uses a separate direct/session
+endpoint for migrations; otherwise migrations use `DATABASE_URL`. Both
+production URLs must enforce TLS. Never run `prisma db push` or migrations from
+application startup.
+
+Automated backups and point-in-time recovery belong to the managed PostgreSQL
+provider, not application code. Set retention and recovery objectives with the
+provider and practice restoring to an isolated database. Application rollback
+must account for schema compatibility: use backward-compatible expand/contract
+migrations and do not assume a code rollback reverses a database migration.
+`npm run test` runs the frontend's Node-based auth/authorization/snapshot/schema
+tests.
 
 The sitemap intentionally lists only the landing page. User and repository
 analytics pages are shareable but currently emit `noindex` metadata, avoiding an

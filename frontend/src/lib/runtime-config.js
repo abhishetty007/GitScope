@@ -33,6 +33,9 @@ export function productionConfigErrors(env = process.env) {
       if (!databaseUrl.username || !databaseUrl.password) {
         errors.push("DATABASE_URL");
       }
+      if (!["require", "verify-ca", "verify-full"].includes(databaseUrl.searchParams.get("sslmode"))) {
+        errors.push("DATABASE_URL (TLS required)");
+      }
       if (decodeURIComponent(databaseUrl.password) === "local-dev-only" ||
           decodeURIComponent(databaseUrl.password) === "change-me") {
         errors.push("DATABASE_URL (local fallback credential)");

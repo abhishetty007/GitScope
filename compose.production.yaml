@@ -1,9 +1,7 @@
-# Production overlay for Compose v2.24+. Keep compose.yaml as the local
+# Production overlay for Compose v2.24.4+. Keep compose.yaml as the local
 # Phase 6A verification configuration. Secrets are supplied at runtime.
 services:
-  postgres:
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+  postgres: !reset null
 
   backend:
     environment:
@@ -23,3 +21,23 @@ services:
       AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:?Set AUTH0_CLIENT_SECRET}
       AUTH0_SECRET: ${AUTH0_SECRET:?Set AUTH0_SECRET}
       AUTH0_ISSUER: ${AUTH0_ISSUER:-}
+      GITSCOPE_DB_POOL_MAX: ${GITSCOPE_DB_POOL_MAX:-5}
+      GITSCOPE_DB_CONNECTION_TIMEOUT_MS: ${GITSCOPE_DB_CONNECTION_TIMEOUT_MS:-5000}
+    depends_on:
+      !override
+      backend:
+        condition: service_healthy
+
+  migrator:
+    profiles: ["release"]
+    build:
+      context: ./frontend
+      target: migrator
+    environment:
+      GITSCOPE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      DIRECT_URL: ${DIRECT_URL:-}
+    restart: "no"
+
+volumes:
+  postgres_data: !reset null
