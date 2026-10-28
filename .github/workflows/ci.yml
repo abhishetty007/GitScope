@@ -1,0 +1,172 @@
+name: GitScope Continuous Integration
+
+on:
+  push:
+    branches:
+      - main
+      - 'staging/**'
+  pull_request:
+    branches:
+      - main
+      - 'staging/**'
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend Quality & Build Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint source code
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Run frontend test suite
+        working-directory: frontend
+        run: npm test
+
+      - name: Verify production standalone build
+        working-directory: frontend
+        env:
+          GITSCOPE_SITE_URL: https://gitscope.preview.local
+        run: npm run build
+
+      - name: Production dependency security audit
+        working-directory: frontend
+        run: npm audit --production
+
+  backend-unit:
+    name: Backend Unit & Contract Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run backend unit test suite
+        run: python -m unittest discover -s backend/tests -p "test_*.py" -v
+
+  postgres-integration:
+    name: PostgreSQL Shared Rate-Limiter Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ci_admin
+          POSTGRES_PASSWORD: ci_ephemeral_admin_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js runtime (for Prisma migration engine)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Python runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Node & Python dependencies
+        run: |
+          cd frontend && npm ci
+          cd ../
+          pip install -r backend/requirements.txt
+
+      - name: Provision Disposable Database and Distinct Roles
+        env:
+          PGPASSWORD: ci_ephemeral_admin_password
+        run: |
+          # Create dedicated disposable test database
+          psql -h localhost -U ci_admin -d postgres -c "CREATE DATABASE gitscope_test;"
+
+          # Create migration owner role with full schema authority on gitscope_test
+          psql -h localhost -U ci_admin -d gitscope_test -c "
+            CREATE ROLE gitscope_migrator WITH LOGIN PASSWORD 'migrator_ephemeral_password';
+            GRANT ALL PRIVILEGES ON DATABASE gitscope_test TO gitscope_migrator;
+            GRANT ALL ON SCHEMA public TO gitscope_migrator;
+          "
+
+          # Create strictly restricted runtime test role (no SUPERUSER, no CREATEDB)
+          psql -h localhost -U ci_admin -d gitscope_test -c "
+            CREATE ROLE gitscope_rate_limiter WITH LOGIN PASSWORD 'limiter_ephemeral_password' NOSUPERUSER NOCREATEDB;
+            GRANT CONNECT ON DATABASE gitscope_test TO gitscope_rate_limiter;
+            GRANT USAGE ON SCHEMA public TO gitscope_rate_limiter;
+          "
+
+      - name: Deploy Prisma Migrations as Migration Owner
+        working-directory: frontend
+        env:
+          DIRECT_URL: postgresql://gitscope_migrator:migrator_ephemeral_password@localhost:5432/gitscope_test?sslmode=disable
+        run: npm run db:migrate:deploy
+
+      - name: Grant Minimal Table Permissions to Runtime Test Role
+        env:
+          PGPASSWORD: ci_ephemeral_admin_password
+        run: |
+          psql -h localhost -U ci_admin -d gitscope_test -c "
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.gitscope_rate_limit_windows TO gitscope_rate_limiter;
+          "
+
+      - name: Execute PostgreSQL Integration Tests (Fail on Skip)
+        env:
+          GITSCOPE_RATE_LIMIT_TEST_DATABASE_URL: postgresql://gitscope_rate_limiter:limiter_ephemeral_password@localhost:5432/gitscope_test?sslmode=disable
+        run: |
+          python -c '
+          import unittest, sys
+          loader = unittest.TestLoader()
+          suite = loader.loadTestsFromName("backend.tests.test_shared_rate_limit.TestPostgresSharedRateLimit")
+          runner = unittest.TextTestRunner(verbosity=2)
+          result = runner.run(suite)
+          if not result.wasSuccessful() or len(result.skipped) > 0 or result.testsRun != 4:
+              print(f"CI INTEGRATION FAILURE: testsRun={result.testsRun}, skipped={len(result.skipped)}, errors={len(result.errors)}, failures={len(result.failures)}")
+              sys.exit(1)
+          print(f"CI INTEGRATION SUCCESS: All {result.testsRun} PostgreSQL integration tests passed with 0 skipped.")
+          '
+
+      - name: Safe Teardown of Disposable Database
+        if: always()
+        env:
+          PGPASSWORD: ci_ephemeral_admin_password
+        run: |
+          # Best-effort database drop; container lifecycle handles complete service teardown
+          psql -h localhost -U ci_admin -d postgres -c "DROP DATABASE IF EXISTS gitscope_test WITH (FORCE);" || true
