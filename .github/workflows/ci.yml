@@ -32,6 +32,10 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Generate Prisma client
+        working-directory: frontend
+        run: npm run db:generate
+
       - name: Lint source code
         working-directory: frontend
         run: npm run lint

@@ -33,7 +33,7 @@ def _multiprocess_limiter_batch(database_url, bucket, barrier, result_queue):
         with ThreadPoolExecutor(max_workers=8) as executor:
             results = list(
                 executor.map(
-                    lambda _index: limiter.allow(bucket, global_limit=7)[0], range(16)
+                    lambda _index: limiter.allow(bucket, global_limit=7, window_seconds=3600)[0], range(16)
                 )
             )
         result_queue.put(sum(results))
@@ -368,6 +368,7 @@ class TestPostgresSharedRateLimit(unittest.TestCase):
             return limiters[index % 2].allow(
                 bucket,
                 global_limit=7,
+                window_seconds=3600,
             )[0]
 
         try:
