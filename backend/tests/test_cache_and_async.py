@@ -197,6 +197,12 @@ class TestAsyncCollector(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         _cache.clear_analysis()
         _cache.clear_raw()
+        from services import github_async_client
+        self.upstream_budget_patch = patch.object(
+            github_async_client, "consume_github_upstream_call"
+        )
+        self.upstream_budget_patch.start()
+        self.addCleanup(self.upstream_budget_patch.stop)
 
     async def _run_with_mock(self, side_effects: list):
         """
@@ -321,6 +327,33 @@ class TestAsyncCollector(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["_commits"], [])
 
+    async def test_commit_page_cap_returns_bounded_sample_and_marks_truncation(self):
+        from services.github_async_client import _collect_evidence_async
+
+        repo = _make_repo()
+        tree = {"truncated": False, "tree": []}
+        full_page = [_make_commit() for _ in range(100)]
+
+        async def mock_get(_self, url, **kwargs):
+            if "/git/trees/" in url:
+                return _make_mock_response(tree)
+            if "/commits" in url:
+                return _make_mock_response(full_page)
+            if "/contributors" in url:
+                return _make_mock_response([])
+            if "/actions/runs" in url:
+                return _make_mock_response({"workflow_runs": []})
+            return _make_mock_response(repo)
+
+        with patch("services.github_async_client._MAX_GITHUB_PAGES", 2), patch(
+            "httpx.AsyncClient.get", mock_get
+        ):
+            result = await _collect_evidence_async("alice", "myrepo")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result["_commits"]), 200)
+        self.assertTrue(result["_commits_truncated"])
+
 
 class TestCacheHitInCollector(unittest.TestCase):
     """
@@ -363,6 +396,12 @@ class TestCollectEvidenceSyncWrapper(unittest.TestCase):
     def setUp(self):
         _cache.clear_analysis()
         _cache.clear_raw()
+        from services import github_async_client
+        self.upstream_budget_patch = patch.object(
+            github_async_client, "consume_github_upstream_call"
+        )
+        self.upstream_budget_patch.start()
+        self.addCleanup(self.upstream_budget_patch.stop)
 
     def test_sync_wrapper_returns_dict_with_private_keys(self):
         repo = _make_repo()

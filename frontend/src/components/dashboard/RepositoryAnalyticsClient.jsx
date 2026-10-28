@@ -1,7 +1,7 @@
 "use client";
 
-import HealthDashboard from "./HealthDashboard";
+import RepositoryHealthExperience from "./RepositoryHealthExperience";
 
 export default function RepositoryAnalyticsClient({ data }) {
-  return <HealthDashboard data={data} error="" />;
+  return <RepositoryHealthExperience data={data} />;
 }

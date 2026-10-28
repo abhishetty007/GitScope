@@ -3,11 +3,41 @@ import "server-only";
 const baseUrl = () =>
   (process.env.GITSCOPE_API_BASE_URL || "http://127.0.0.1:5000").replace(/\/$/, "");
 
+const safeDownstreamMessages = new Set([
+  "Public repository not found",
+  "Repository not found",
+  "GitHub rate limit exceeded. Try again later.",
+  "Too many GitHub requests. Try again later.",
+  "GitHub service capacity is temporarily exhausted. Try again later.",
+  "GitHub request budget temporarily exhausted. Try again later.",
+  "Service temporarily unavailable. Try again shortly.",
+  "Internal server error",
+]);
+
 async function getJson(path) {
   const response = await fetch(`${baseUrl()}${path}`, { cache: "no-store" });
   if (!response.ok) {
-    const error = new Error(response.status === 404 ? "Public repository not found" : "GitScope analytics service is unavailable");
+    const payload = await response.clone().json().catch(() => ({}));
+    const message = safeDownstreamMessages.has(payload.error)
+      ? payload.error
+      : "Downstream service returned an unrecognized error";
+    console.error("public_github_downstream_failure", {
+      path,
+      status: response.status,
+      message,
+    });
+    const error = new Error(
+      response.status === 404
+        ? "Public repository not found"
+        : safeDownstreamMessages.has(payload.error)
+          ? payload.error
+          : "GitScope analytics service is unavailable"
+    );
     error.status = response.status;
+    const retryAfter = Number(response.headers.get("retry-after"));
+    if (Number.isSafeInteger(retryAfter) && retryAfter > 0) {
+      error.retryAfter = retryAfter;
+    }
     throw error;
   }
   return response.json();

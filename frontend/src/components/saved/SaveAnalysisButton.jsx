@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { loginHref } from "../../utils/auth-redirect.js";
 
 export default function SaveAnalysisButton({ owner, repository }) {
   const [status, setStatus] = useState("");
@@ -20,7 +21,7 @@ export default function SaveAnalysisButton({ owner, repository }) {
       const result = await response.json().catch(() => ({}));
       if (response.status === 401) {
         const returnTo = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
-        window.location.assign(`/auth/login?returnTo=${encodeURIComponent(returnTo)}`);
+        window.location.assign(loginHref(returnTo));
         return;
       }
       if (!response.ok) throw new Error(result.error || "Could not save analysis.");

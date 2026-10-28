@@ -88,3 +88,14 @@ model TrackedRepository {
   @@index([repositoryId])
   @@map("tracked_repositories")
 }
+
+model RateLimitWindow {
+  bucket       String   @db.VarChar(64)
+  clientKey    String   @map("client_key") @db.Char(64)
+  windowStart  DateTime @map("window_start") @db.Timestamptz(0)
+  requestCount Int      @default(1) @map("request_count")
+
+  @@id([bucket, clientKey, windowStart])
+  @@index([windowStart])
+  @@map("gitscope_rate_limit_windows")
+}

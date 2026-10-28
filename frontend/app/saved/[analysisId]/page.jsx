@@ -4,6 +4,8 @@ import Header from "../../../src/components/layout/Header";
 import MutationButton from "../../../src/components/saved/MutationButton";
 import { getCurrentUser } from "../../../src/lib/current-user";
 import { getSavedAnalysis } from "../../../src/lib/user-data";
+import { calculateGrade } from "../../../src/utils/gradeCalculator";
+import { loginHref } from "../../../src/utils/auth-redirect.js";
 
 export const dynamic = "force-dynamic";
 
@@ -13,10 +15,10 @@ export async function generateMetadata({ params }) {
 }
 
 export default async function SavedAnalysisPage({ params }) {
-  const user = await getCurrentUser();
-  if (!user) redirect(`/auth/login?returnTo=${encodeURIComponent("/saved")}`);
   const { analysisId } = await params;
   if (!/^[0-9a-f-]{36}$/i.test(analysisId)) notFound();
+  const user = await getCurrentUser();
+  if (!user) redirect(loginHref(`/saved/${analysisId}`));
 
   const saved = await getSavedAnalysis(user.id, analysisId);
   if (!saved) notFound();
@@ -27,21 +29,23 @@ export default async function SavedAnalysisPage({ params }) {
     <>
       <Header />
       <main className="container account-page saved-detail">
-        <p><Link href="/saved">← Saved analyses</Link></p>
+        <p className="back-link"><Link href="/saved">← Saved analyses</Link></p>
+        <p className="eyebrow">Saved snapshot · Not automatically refreshed</p>
         <h1 className="page-title">{repository.full_name}</h1>
         <p>{repository.description || "No description available."}</p>
         <p>Saved snapshot · {new Date(saved.createdAt).toLocaleDateString()}</p>
         <section className="saved-score" aria-label="Engineering health score">
-          <strong>{score ?? "N/A"}<small> / 100</small></strong>
+          <span className="micro-label">ENGINEERING HEALTH</span><strong>{score ?? "N/A"}<small> / 100</small></strong><span className="grade-label">Grade <b>{calculateGrade(score)}</b></span>
           <p>{result.health.summary}</p>
         </section>
+        <div className="snapshot-actions"><Link className="button button-secondary" href={`/repos/${encodeURIComponent(saved.analysis.repository.ownerLogin)}/${encodeURIComponent(saved.analysis.repository.name)}`}>Open live repository analysis <span aria-hidden="true">→</span></Link></div>
         <h2>Category results</h2>
         <ul className="account-list">
           {Object.entries(result.health.categories || {}).map(([key, category]) => (
             <li className="account-card saved-category" key={key}>
               <div>
                 <h3>{category.label}</h3>
-                <p>{category.score ?? "N/A"} / {category.max_score}</p>
+                    <p>{category.score ?? "N/A"} / {category.max_score}</p>
                 {category.checks.map((check, index) => (
                   <p key={`${check.name}-${index}`}>
                     <strong>{check.name}</strong> · {check.status}: {check.evidence}

@@ -8,7 +8,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
-function ProfileAnalytics({ analytics, username, onAnalyzeRepo, analyzingRepo }) {
+function ProfileAnalytics({ analytics, username, onAnalyzeRepo, analyzingRepo, summaryOnly = false }) {
   if (!analytics) return null;
 
   const languageChartData = analytics.languages
@@ -46,7 +46,7 @@ function ProfileAnalytics({ analytics, username, onAnalyzeRepo, analyzingRepo })
         </div>
       </div>
 
-      {languageChartData.length > 0 && (
+      {!summaryOnly && languageChartData.length > 0 && (
         <div className="chart-card">
           <h3>Language Distribution</h3>
           <ResponsiveContainer width="100%" height={350}>
@@ -67,7 +67,7 @@ function ProfileAnalytics({ analytics, username, onAnalyzeRepo, analyzingRepo })
         </div>
       )}
 
-      {topRepos.length > 0 && (
+      {!summaryOnly && topRepos.length > 0 && (
         <div style={{ marginTop: "24px" }}>
           <h3 className="section-title">Top Repositories</h3>
           <div className="repository-grid">

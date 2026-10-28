@@ -4,15 +4,19 @@ import Header from "../../src/components/layout/Header";
 import MutationButton from "../../src/components/saved/MutationButton";
 import TrackRepositoryForm from "../../src/components/tracked/TrackRepositoryForm";
 import { getCurrentUser } from "../../src/lib/current-user";
+import { loginHref } from "../../src/utils/auth-redirect.js";
 import { getDb } from "../../src/lib/db";
 
 export const dynamic = "force-dynamic";
 
-export const metadata = { title: "Tracked repositories" };
+export const metadata = {
+  title: "Tracked repositories",
+  robots: { index: false, follow: false },
+};
 
 export default async function TrackedRepositoriesPage() {
   const user = await getCurrentUser();
-  if (!user) redirect("/auth/login?returnTo=%2Ftracked");
+  if (!user) redirect(loginHref("/tracked"));
   const tracked = await getDb().trackedRepository.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: "desc" },
@@ -46,16 +50,16 @@ export default async function TrackedRepositoriesPage() {
                       {repository.ownerLogin}/{repository.name}
                     </Link>
                   </h2>
-                  <p>Public · Tracked {new Date(createdAt).toLocaleDateString()}</p>
+                  <p>Public repository · Tracked {new Date(createdAt).toLocaleDateString()}</p>
                 </div>
-                <MutationButton
+                <div className="account-actions"><Link className="button button-primary" href={`/repos/${encodeURIComponent(repository.ownerLogin)}/${encodeURIComponent(repository.name)}`}>Analyze repository <span aria-hidden="true">→</span></Link><MutationButton
                   endpoint={`/api/tracked-repositories/${repository.id}`}
                   label="Untrack"
-                />
+                /></div>
               </li>
             ))}
           </ul>
-        ) : <p>You are not tracking any repositories yet.</p>}
+        ) : <section className="empty-state-panel"><span className="empty-state-icon" aria-hidden="true">⌖</span><h2>No tracked repositories yet</h2><p>Tracking keeps public repositories close at hand. It does not grant access to private repositories.</p><p>Enter a public <code>owner/name</code> above, or start with an analysis.</p><Link className="button button-secondary" href="/">Analyze a repository <span aria-hidden="true">→</span></Link></section>}
       </main>
     </>
   );

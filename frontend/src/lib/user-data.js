@@ -65,7 +65,9 @@ export async function saveAnalysisForUser(userId, owner, repository, dependencie
       select: { id: true },
     });
 
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${saved.id}, 0))`;
+    // The PostgreSQL lock function returns `void`; `$queryRaw` asks Prisma
+    // to decode that unsupported type. Execute it without decoding rows.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${saved.id}, 0))`;
     saved = await tx.analysis.findUnique({ where: { id: saved.id }, select: { id: true } });
     if (!saved) {
       saved = await tx.analysis.upsert({
@@ -131,7 +133,9 @@ export async function getSavedAnalysis(userId, analysisId, db = getDb()) {
 
 export async function deleteSavedAnalysis(userId, analysisId, db = getDb()) {
   return db.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${analysisId}, 0))`;
+    // The advisory-lock function returns PostgreSQL `void`, which Prisma
+    // cannot decode as a query result. Execute it without reading rows.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${analysisId}, 0))`;
     const owned = await tx.savedAnalysis.findUnique({
       where: { userId_analysisId: { userId, analysisId } },
       select: { analysisId: true },

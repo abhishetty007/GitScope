@@ -1,10 +1,13 @@
 from flask import Flask, g, jsonify, request
 import logging
 import os
+import re
 import sys
+import threading
 import time
 import traceback
 import uuid
+from concurrent.futures import TimeoutError as FutureTimeoutError
 
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
@@ -20,6 +23,7 @@ from services.github_service import (
 )
 
 from services.github_async_client import collect_evidence
+from github_errors import GitHubRateLimitExceeded, GitHubUpstreamBudgetExceeded
 
 from services.analytics_service import (
     analyze_repositories,
@@ -30,26 +34,74 @@ from services.analytics_service import (
 
 import cache as _cache
 from runtime_config import bounded_integer, cors_origins, debug_enabled, validate_runtime_config
-from rate_limit import FixedWindowRateLimiter
+from rate_limit import (
+    RateLimitStoreUnavailable,
+    get_default_rate_limiter,
+)
+from request_dedupe import coalesce as coalesce_inflight
 
 
 validate_runtime_config()
 app = Flask(__name__)
 
+_GITHUB_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9_.\-\[\]]+")
+
+
+def _valid_github_identifier(value, maximum_length):
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= maximum_length
+        and value not in {".", ".."}
+        and _GITHUB_IDENTIFIER_PATTERN.fullmatch(value) is not None
+    )
+
 _cors_origins = cors_origins()
 if _cors_origins:
     CORS(app, resources={r"/api/*": {"origins": _cors_origins}})
 
-_public_analytics_limiter = FixedWindowRateLimiter(
-    bounded_integer(os.environ, "GITSCOPE_PUBLIC_ANALYTICS_LIMIT_PER_MINUTE", 60, 1, 10000)
-)
+_rate_limiter = None
+_rate_limiter_lock = threading.Lock()
+_RATE_LIMIT_POLICIES = {
+    # Service-wide requests per fixed minute window. These calls run server-side
+    # on Vercel, so Render cannot safely infer the browser client IP.
+    "repository_evidence": 10,
+    "user_analytics": 30,
+    "github_metadata": 60,
+}
 
 
-def _public_analytics_rate_limit(bucket):
-    allowed, retry_after = _public_analytics_limiter.allow(bucket)
+def _get_rate_limiter():
+    global _rate_limiter
+    if _rate_limiter is None:
+        with _rate_limiter_lock:
+            if _rate_limiter is None:
+                _rate_limiter = get_default_rate_limiter()
+    return _rate_limiter
+
+
+def _public_rate_limit(bucket):
+    global_limit = _RATE_LIMIT_POLICIES[bucket]
+    if bucket == "github_metadata":
+        global_limit = bounded_integer(
+            os.environ, "GITSCOPE_GITHUB_METADATA_GLOBAL_LIMIT_PER_MINUTE", global_limit, 1, 100000
+        )
+    try:
+        limiter = _get_rate_limiter()
+        allowed, retry_after = limiter.allow(
+            bucket,
+            global_limit=global_limit,
+        )
+    except Exception as error:
+        # A failed limiter must never turn expensive upstream requests into
+        # unlimited work. Keep database details out of the response and logs.
+        app.logger.error("shared_rate_limit_unavailable exception_type=%s", type(error).__name__)
+        response = jsonify({"error": "Service temporarily unavailable. Try again shortly."})
+        response.status_code = 503
+        response.headers["Retry-After"] = "5"
+        return response
     if allowed:
         return None
-    response = jsonify({"error": "Too many analytics requests. Try again later."})
+    response = jsonify({"error": "Too many GitHub requests. Try again later."})
     response.status_code = 429
     response.headers["Retry-After"] = str(retry_after)
     return response
@@ -72,6 +124,21 @@ def _log_exception(error, level=logging.ERROR):
 def _internal_server_error(error=None):
     if error is None:
         error = sys.exc_info()[1]
+    if isinstance(error, GitHubRateLimitExceeded):
+        response = jsonify({"error": "GitHub rate limit exceeded. Try again later."})
+        response.status_code = 429
+        response.headers["Retry-After"] = str(error.retry_after)
+        return response
+    if isinstance(error, GitHubUpstreamBudgetExceeded):
+        response = jsonify({"error": "GitHub request budget temporarily exhausted. Try again later."})
+        response.status_code = 429
+        response.headers["Retry-After"] = str(error.retry_after)
+        return response
+    if isinstance(error, RateLimitStoreUnavailable):
+        response = jsonify({"error": "Service temporarily unavailable. Try again shortly."})
+        response.status_code = 503
+        response.headers["Retry-After"] = "5"
+        return response
     if error is not None:
         _log_exception(error)
     return jsonify({"error": "Internal server error"}), 500
@@ -88,6 +155,24 @@ def _handle_unexpected_exception(error):
 def _start_request_context():
     g.request_id = str(uuid.uuid4())
     g.request_started_at = time.perf_counter()
+
+
+@app.before_request
+def _validate_github_path_parameters():
+    if not (request.endpoint or "").startswith("github_"):
+        return None
+
+    parameters = request.view_args or {}
+    username = parameters.get("username")
+    owner = parameters.get("owner")
+    repository = parameters.get("repository")
+    if (
+        (username is not None and not _valid_github_identifier(username, 39))
+        or (owner is not None and not _valid_github_identifier(owner, 39))
+        or (repository is not None and not _valid_github_identifier(repository, 100))
+    ):
+        return jsonify({"error": "Invalid GitHub target"}), 400
+    return None
 
 
 @app.after_request
@@ -132,6 +217,9 @@ def health():
 
 @app.route("/api/github/user/<username>")
 def github_user(username):
+    limited = _public_rate_limit("github_metadata")
+    if limited:
+        return limited
     try:
         user = get_user(username)
 
@@ -161,6 +249,9 @@ def github_user(username):
 
 @app.route("/api/github/user/<username>/repositories")
 def github_repositories(username):
+    limited = _public_rate_limit("github_metadata")
+    if limited:
+        return limited
     try:
         repositories = get_user_repositories(
             username
@@ -219,7 +310,7 @@ def github_repositories(username):
 
 @app.route("/api/github/user/<username>/analytics")
 def github_analytics(username):
-    limited = _public_analytics_rate_limit("user")
+    limited = _public_rate_limit("user_analytics")
     if limited:
         return limited
     try:
@@ -255,6 +346,9 @@ def github_analytics(username):
     "/api/github/repository/<owner>/<repository>"
 )
 def github_repository(owner, repository):
+    limited = _public_rate_limit("github_metadata")
+    if limited:
+        return limited
     try:
         repo = get_repository(
             owner,
@@ -308,6 +402,9 @@ def github_repository(owner, repository):
 @app.route("/api/github/repository/<owner>/<repository>/identity")
 def github_repository_identity(owner, repository):
     """Return the stable public GitHub repository identity for Next.js persistence."""
+    limited = _public_rate_limit("github_metadata")
+    if limited:
+        return limited
     try:
         repo = get_repository(owner, repository)
         if repo is None or repo.get("private", False):
@@ -337,6 +434,9 @@ def github_repository_identity(owner, repository):
     "/api/github/repository/<owner>/<repository>/commits"
 )
 def github_commits(owner, repository):
+    limited = _public_rate_limit("github_metadata")
+    if limited:
+        return limited
     try:
         repo = get_repository(owner, repository)
         if repo is None or repo.get("private", False):
@@ -397,6 +497,9 @@ def github_commits(owner, repository):
     "/api/github/repository/<owner>/<repository>/contributors"
 )
 def github_contributors(owner, repository):
+    limited = _public_rate_limit("github_metadata")
+    if limited:
+        return limited
     try:
         repo = get_repository(owner, repository)
         if repo is None or repo.get("private", False):
@@ -433,7 +536,7 @@ def github_repository_evidence(
     owner,
     repository
 ):
-    limited = _public_analytics_rate_limit("repository")
+    limited = _public_rate_limit("repository_evidence")
     if limited:
         return limited
     try:
@@ -464,9 +567,33 @@ def github_repository_analytics(
     owner,
     repository
 ):
-    limited = _public_analytics_rate_limit("repository")
-    if limited:
-        return limited
+    try:
+        result = coalesce_inflight(
+            ("repository_analysis", owner.lower(), repository.lower()),
+            lambda: _github_repository_analytics_impl(owner, repository),
+            timeout_seconds=_MAX_ANALYSIS_SECONDS + 5,
+        )
+    except FutureTimeoutError:
+        response = jsonify({"error": "Repository analysis is still in progress. Try again shortly."})
+        response.status_code = 503
+        response.headers["Retry-After"] = "5"
+        return response
+
+    # Give each Flask request its own response object so request IDs and other
+    # after_request headers cannot race between duplicate callers.
+    shared_response = app.make_response(result)
+    response = app.response_class(
+        shared_response.get_data(),
+        status=shared_response.status_code,
+        content_type=shared_response.content_type,
+    )
+    for header, value in shared_response.headers:
+        if header.lower() not in {"content-type", "content-length", "x-request-id"}:
+            response.headers.add(header, value)
+    return response
+
+
+def _github_repository_analytics_impl(owner, repository):
     analysis_started = time.monotonic()
     try:
         # Always confirm current visibility before serving a cached public
@@ -517,6 +644,7 @@ def github_repository_analytics(
         # Pull out the private keys that the collector already
         # fetched concurrently alongside file contents.
         commits = evidence.pop("_commits", []) or []
+        commits_truncated = bool(evidence.pop("_commits_truncated", False))
         contributors = evidence.pop("_contributors", []) or []
         workflow_runs = evidence.pop("_workflow_runs", None)
 
@@ -572,6 +700,7 @@ def github_repository_analytics(
                 "important_files": evidence.get("important_files", {}),
                 "workflows": evidence.get("workflows", []),
                 "repository_flags": evidence.get("repository_flags", {}),
+                "commit_history_truncated": commits_truncated,
             },
         }
 
@@ -580,12 +709,9 @@ def github_repository_analytics(
 
         return jsonify(result)
 
-    except RuntimeError as error:
-        # Preserve the intentional status without exposing upstream details.
-        _log_exception(error, logging.WARNING)
-        return jsonify({
-            "error": "GitHub rate limit exceeded. Try again later."
-        }), 429
+    except GitHubRateLimitExceeded as error:
+        # Preserve the upstream rate limit distinctly from the local 429.
+        return _internal_server_error(error)
 
     except Exception:
         return _internal_server_error()

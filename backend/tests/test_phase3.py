@@ -24,9 +24,9 @@ class TestPhase3Analytics(unittest.TestCase):
 
     def test_cadence_fields(self):
         now = datetime.now(timezone.utc)
-        commits = [{"commit": {"author": {"name": "a", "date": (now - timedelta(days=n)).isoformat()}}} for n in (0, 10, 40, 400)]
+        commits = [{"commit": {"author": {"name": "a", "date": (now - timedelta(days=n)).isoformat()}}} for n in (0, 40, 80, 400)]
         result = analyze_commits(commits)
-        self.assertEqual(result["commits_last_30_days"], 2)
+        self.assertEqual(result["commits_last_30_days"], 1)
         self.assertEqual(result["commits_last_365_days"], 3)
         self.assertEqual(result["active_months"], 4)
         self.assertGreaterEqual(result["longest_gap_days"], 300)
@@ -76,6 +76,12 @@ class TestPhase3Analytics(unittest.TestCase):
 class TestActionsCollection(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         cache.clear_raw()
+        from services import github_async_client
+        self.upstream_budget_patch = patch.object(
+            github_async_client, "consume_github_upstream_call"
+        )
+        self.upstream_budget_patch.start()
+        self.addCleanup(self.upstream_budget_patch.stop)
 
     def test_runs_key_is_stable_and_case_normalized(self):
         self.assertEqual(cache.runs_key("Alice", "Repo"), cache.runs_key("alice", "repo"))
@@ -126,6 +132,11 @@ class TestActionsCollection(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertEqual(mock_get.await_count, 1)
 class TestPhase3ApiContract(unittest.TestCase):
+    def setUp(self):
+        self.rate_limit_patch = patch("app._public_rate_limit", return_value=None)
+        self.rate_limit_patch.start()
+        self.addCleanup(self.rate_limit_patch.stop)
+
     def test_public_repository_identity_returns_stable_id_as_string(self):
         from app import app
         repo = {
@@ -191,7 +202,8 @@ class TestPhase3ApiContract(unittest.TestCase):
             "repository": {"name": "repo", "full_name": "alice/repo"},
             "structure": {}, "important_files": {}, "workflows": [],
             "repository_flags": {}, "file_contents": {},
-            "_commits": [], "_contributors": [], "_workflow_runs": [],
+            "_commits": [], "_commits_truncated": True,
+            "_contributors": [], "_workflow_runs": [],
         }
         with patch("app.get_repository", return_value={"private": False}), \
              patch("app.collect_evidence", return_value=evidence) as collect:
@@ -202,6 +214,7 @@ class TestPhase3ApiContract(unittest.TestCase):
         collect.assert_called_once()
         self.assertEqual(collect.call_args.args, ("alice", "repo"))
         self.assertGreater(collect.call_args.kwargs["timeout_seconds"], 0)
+        self.assertTrue(response.get_json()["evidence"]["commit_history_truncated"])
         self.assertEqual(
             app_cache.get_raw(app_cache.repo_key("alice", "repo")),
             {"private": False},

@@ -42,19 +42,18 @@ export default async function RepositoryAnalyticsPage({ params }) {
       <>
         <Header />
         <main className="container">
-          <h1 className="page-title">Engineering health: {owner}/{repository}</h1>
-          <ApiErrorState message={error.message} />
+          <ApiErrorState status={error.status} message={error.message} retryAfter={error.retryAfter} />
         </main>
       </>
     );
   }
-  const fullName = data.repository.full_name || `${owner}/${repository}`;
   return (
     <>
       <Header />
       <main className="container">
-        <h1 className="page-title">Engineering health: {fullName}</h1>
+        <div className="analysis-toolbar"><p>Public repository · Evidence-based assessment</p>
         <SaveAnalysisButton owner={owner} repository={repository} />
+        </div>
         <RepositoryAnalyticsClient data={data} />
       </main>
     </>

@@ -50,6 +50,9 @@ class TestFlaskSafeBoundary(unittest.TestCase):
 
     def setUp(self):
         self.client = self.app.test_client()
+        self.rate_limit_patch = patch("app._public_rate_limit", return_value=None)
+        self.rate_limit_patch.start()
+        self.addCleanup(self.rate_limit_patch.stop)
 
     def test_unexpected_error_is_sanitized_and_request_id_is_server_generated(self):
         secret = "ghp_security_test_secret"
@@ -143,20 +146,43 @@ class TestFlaskSafeBoundary(unittest.TestCase):
         self.assertEqual(response.get_json(), {"error": "Repository not found"})
         UUID(response.headers["X-Request-ID"])
 
+    def test_github_path_parameters_reject_query_and_path_delimiters_before_upstream(self):
+        with patch("app.get_repository") as get_repository:
+            response = self.client.get(
+                "/api/github/repository/alice%3Fper_page%3D100/repo/identity"
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {"error": "Invalid GitHub target"})
+        get_repository.assert_not_called()
+        UUID(response.headers["X-Request-ID"])
+
+    def test_github_path_parameters_allow_bot_identifiers_and_normal_repository_names(self):
+        with patch("app.get_repository", return_value={
+            "id": 123,
+            "name": "repo.name",
+            "owner": {"login": "dependabot[bot]"},
+            "private": False,
+        }):
+            response = self.client.get(
+                "/api/github/repository/dependabot%5Bbot%5D/repo.name/identity"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["owner_login"], "dependabot[bot]")
+
     def test_rate_limit_status_and_json_shape_are_preserved_without_details(self):
-        internal_detail = "https://api.github.com/repos/alice/repo?token=upstream-secret"
-        with patch("app.get_repository", side_effect=RuntimeError(internal_detail)):
-            with self.assertLogs("app", level="WARNING") as captured:
-                response = self.client.get(
-                    "/api/github/repository/alice/repo/analytics"
-                )
+        from github_errors import GitHubRateLimitExceeded
+
+        with patch("app.get_repository", side_effect=GitHubRateLimitExceeded(45)):
+            response = self.client.get("/api/github/repository/alice/repo/analytics")
         self.assertEqual(response.status_code, 429)
         self.assertEqual(
             response.get_json(),
             {"error": "GitHub rate limit exceeded. Try again later."},
         )
-        self.assertNotIn("upstream-secret", response.get_data(as_text=True))
-        self.assertNotIn("?token=upstream-secret", "\n".join(captured.output))
+        self.assertEqual(response.headers["Retry-After"], "45")
+        self.assertNotIn("https://api.github.com", response.get_data(as_text=True))
         UUID(response.headers["X-Request-ID"])
 
     def test_success_payload_is_unchanged_and_has_request_id_header(self):

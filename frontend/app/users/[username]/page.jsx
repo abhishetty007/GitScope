@@ -41,7 +41,7 @@ export default async function UserAnalyticsPage({ params }) {
         <Header />
         <main className="container">
           <h1 className="page-title">GitHub analytics for @{username}</h1>
-          <ApiErrorState message={error.message} />
+          <ApiErrorState status={error.status} message={error.message} retryAfter={error.retryAfter} />
         </main>
       </>
     );

@@ -8,10 +8,13 @@ import { compactAnalysis, analysisSnapshotHash } from "../src/lib/analysis-snaps
 import { createProtectedHandlers } from "../src/lib/protected-handlers.js";
 import { hasSameOrigin } from "../src/lib/request-security.js";
 import { safeErrorMessage } from "../src/lib/safe-error-message.js";
-import { assertProductionConfig, productionConfigErrors } from "../src/lib/runtime-config.js";
+import { assertProductionConfig, auth0SettingsErrors, productionConfigErrors } from "../src/lib/runtime-config.js";
 import { getDatabasePoolOptions } from "../src/lib/database-pool-config.js";
 import { getMigrationDatabaseUrl } from "../src/lib/migration-database-url.js";
 import { databaseReadinessResponse, isDatabaseReady } from "../src/lib/database-readiness.js";
+import { fetchPublicAnalysis } from "../src/lib/public-github.js";
+import { getRateLimitPresentation } from "../src/components/layout/rate-limit-presentation.js";
+import { deleteSavedAnalysis, saveAnalysisForUser } from "../src/lib/user-data.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -22,6 +25,21 @@ test("error boundary message never exposes arbitrary exception details", () => {
     "This request could not be completed. Please try again.",
   );
   assert.equal(safeErrorMessage(new Error(secretText)).includes(secretText), false);
+});
+
+test("429 presentation distinguishes GitHub limits from GitScope admission limits", () => {
+  assert.equal(
+    getRateLimitPresentation(429, "GitHub rate limit exceeded. Try again later.").title,
+    "GitHub rate limit reached",
+  );
+  for (const message of [
+    "Too many GitHub requests. Try again later.",
+    "GitHub service capacity is temporarily exhausted. Try again later.",
+    "GitHub request budget temporarily exhausted. Try again later.",
+  ]) {
+    assert.notEqual(getRateLimitPresentation(429, message).title, "GitHub rate limit reached");
+  }
+  assert.equal(getRateLimitPresentation(429, undefined).title, "Request limit reached");
 });
 
 test("Next error boundary renders the safe message helper and retains retry", async () => {
@@ -45,6 +63,15 @@ test("production configuration reports missing setting names without values", ()
   );
 });
 
+test("Auth0 local configuration requires server credentials and a matching issuer", () => {
+  const valid = { AUTH0_DOMAIN: "tenant.example", AUTH0_ISSUER: "https://tenant.example/", AUTH0_CLIENT_ID: "client-id", AUTH0_CLIENT_SECRET: "client-secret", AUTH0_SECRET: "a".repeat(64), APP_BASE_URL: "http://localhost:3000" };
+  assert.deepEqual(auth0SettingsErrors(valid), []);
+  assert.ok(auth0SettingsErrors({ ...valid, AUTH0_ISSUER: "https://attacker.example/" }).includes("AUTH0_ISSUER"));
+  assert.ok(auth0SettingsErrors({ ...valid, AUTH0_SECRET: "short" }).some((name) => name.startsWith("AUTH0_SECRET")));
+  assert.ok(auth0SettingsErrors({ ...valid, APP_BASE_URL: "javascript:alert(1)" }).includes("APP_BASE_URL"));
+  assert.ok(auth0SettingsErrors({ AUTH0_DOMAIN: "tenant.example" }).includes("AUTH0_CLIENT_SECRET"));
+});
+
 test("production config rejects the local database fallback but local config stays optional", () => {
   const base = {
     GITSCOPE_ENV: "production",
@@ -53,6 +80,7 @@ test("production config rejects the local database fallback but local config sta
     GITSCOPE_SITE_URL: "https://gitscope.example",
     APP_BASE_URL: "https://gitscope.example",
     AUTH0_DOMAIN: "tenant.example",
+    AUTH0_ISSUER: "https://tenant.example/",
     AUTH0_CLIENT_ID: "client-id",
     AUTH0_CLIENT_SECRET: "client-secret",
     AUTH0_SECRET: "a".repeat(64),
@@ -60,6 +88,22 @@ test("production config rejects the local database fallback but local config sta
   assert.ok(productionConfigErrors(base).some((name) => name.startsWith("DATABASE_URL")));
   assert.deepEqual(productionConfigErrors({ NODE_ENV: "production" }), []);
   assert.deepEqual(productionConfigErrors({}), []);
+});
+
+test("production Auth0 issuer is optional and derived from the configured domain", () => {
+  const config = {
+    GITSCOPE_ENV: "production",
+    DATABASE_URL: "postgresql://app:secret@db:5432/gitscope?sslmode=require",
+    GITSCOPE_API_BASE_URL: "http://backend:5000",
+    GITSCOPE_SITE_URL: "https://gitscope.example",
+    APP_BASE_URL: "https://gitscope.example",
+    AUTH0_DOMAIN: "tenant.example",
+    AUTH0_CLIENT_ID: "client-id",
+    AUTH0_CLIENT_SECRET: "client-secret",
+    AUTH0_SECRET: "a".repeat(64),
+  };
+  assert.deepEqual(productionConfigErrors(config), []);
+  assert.ok(productionConfigErrors({ ...config, AUTH0_ISSUER: "https://attacker.example/" }).includes("AUTH0_ISSUER"));
 });
 
 test("production database URL requires explicit TLS", () => {
@@ -70,6 +114,7 @@ test("production database URL requires explicit TLS", () => {
     GITSCOPE_SITE_URL: "https://gitscope.example",
     APP_BASE_URL: "https://gitscope.example",
     AUTH0_DOMAIN: "tenant.example",
+    AUTH0_ISSUER: "https://tenant.example/",
     AUTH0_CLIENT_ID: "client-id",
     AUTH0_CLIENT_SECRET: "client-secret",
     AUTH0_SECRET: "a".repeat(64),
@@ -79,6 +124,13 @@ test("production database URL requires explicit TLS", () => {
     ...config,
     DATABASE_URL: `${config.DATABASE_URL}?sslmode=require`,
   }), []);
+  for (const duplicate of [
+    "postgresql://app:secret@db:5432/gitscope?sslmode=require&sslmode=disable",
+    "postgresql://app:secret@db:5432/gitscope?sslmode=disable&sslmode=require",
+    "postgresql://app:secret@db:5432/gitscope?sslmode=require&%73slmode=require",
+  ]) {
+    assert.ok(productionConfigErrors({ ...config, DATABASE_URL: duplicate }).some((name) => name.includes("TLS")));
+  }
 });
 
 test("production public origins require HTTPS while private Flask may use HTTP", () => {
@@ -89,6 +141,7 @@ test("production public origins require HTTPS while private Flask may use HTTP",
     GITSCOPE_SITE_URL: "https://gitscope.example",
     APP_BASE_URL: "https://gitscope.example",
     AUTH0_DOMAIN: "tenant.example",
+    AUTH0_ISSUER: "https://tenant.example/",
     AUTH0_CLIENT_ID: "client-id",
     AUTH0_CLIENT_SECRET: "client-secret",
     AUTH0_SECRET: "b".repeat(64),
@@ -96,6 +149,8 @@ test("production public origins require HTTPS while private Flask may use HTTP",
   assert.deepEqual(productionConfigErrors(config), []);
   assert.ok(productionConfigErrors({ ...config, APP_BASE_URL: "http://gitscope.example" }).includes("APP_BASE_URL"));
   assert.ok(productionConfigErrors({ ...config, GITSCOPE_SITE_URL: "http://gitscope.example" }).includes("GITSCOPE_SITE_URL"));
+  assert.ok(productionConfigErrors({ ...config, GITSCOPE_API_BASE_URL: "http://api.gitscope.example" }).includes("GITSCOPE_API_BASE_URL"));
+  assert.deepEqual(productionConfigErrors({ ...config, GITSCOPE_API_BASE_URL: "https://api.gitscope.example" }), []);
   assert.deepEqual(productionConfigErrors({ ...config, GITSCOPE_ENV: "development", APP_BASE_URL: "http://localhost:3000", GITSCOPE_SITE_URL: "http://localhost:3000" }), []);
 });
 
@@ -107,6 +162,7 @@ test("production Auth0 secret must be a 32-byte hex value and local config stays
     GITSCOPE_SITE_URL: "https://gitscope.example",
     APP_BASE_URL: "https://gitscope.example",
     AUTH0_DOMAIN: "tenant.example",
+    AUTH0_ISSUER: "https://tenant.example/",
     AUTH0_CLIENT_ID: "client-id",
     AUTH0_CLIENT_SECRET: "client-secret",
     AUTH0_SECRET: "c".repeat(64),
@@ -179,6 +235,16 @@ test("frontend Docker default stage is runner and migrator remains an explicit t
   assert.match(productionCompose, /migrator:[\s\S]*?target: migrator/);
 });
 
+test("production npm entrypoint loads runtime env before starting the standalone server", async () => {
+  const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+  const launcher = await readFile(path.join(root, "start-standalone.mjs"), "utf8");
+  const dockerfile = await readFile(path.join(root, "Dockerfile"), "utf8");
+  assert.equal(packageJson.scripts.start, "node start-standalone.mjs");
+  assert.equal(packageJson.scripts.preview, "node start-standalone.mjs");
+  assert.ok(launcher.indexOf("loadEnvConfig(process.cwd(), false)") < launcher.indexOf('await import("./.next/standalone/server.js")'));
+  assert.match(dockerfile, /CMD \["node", "server\.js"\]/);
+});
+
 test("production Compose uses DB readiness and grants backend graceful shutdown time", async () => {
   const productionCompose = await readFile(path.resolve(root, "..", "compose.production.yaml"), "utf8");
   assert.match(productionCompose, /\/api\/ready/);
@@ -210,6 +276,8 @@ test("migration URL prefers explicit direct URL and otherwise uses DATABASE_URL"
   assert.equal(getMigrationDatabaseUrl({ GITSCOPE_ENV: "production", DATABASE_URL: runtimeUrl }), runtimeUrl);
   assert.throws(() => getMigrationDatabaseUrl({ GITSCOPE_ENV: "production" }), /require DIRECT_URL or DATABASE_URL/);
   assert.throws(() => getMigrationDatabaseUrl({ GITSCOPE_ENV: "production", DATABASE_URL: "postgresql://app:secret@db/gitscope" }), /must enforce TLS/);
+  assert.throws(() => getMigrationDatabaseUrl({ GITSCOPE_ENV: "production", DATABASE_URL: "postgresql://app:secret@db/gitscope?sslmode=require&sslmode=disable" }), /must enforce TLS/);
+  assert.throws(() => getMigrationDatabaseUrl({ GITSCOPE_ENV: "production", DATABASE_URL: "postgresql://app:secret@db/gitscope?sslmode=disable&sslmode=require" }), /must enforce TLS/);
   assert.match(getMigrationDatabaseUrl({}), /127\.0\.0\.1:5432/);
 });
 
@@ -285,6 +353,23 @@ test("Auth0 subject maps to a local user by configured issuer and subject, never
   }
 });
 
+test("repeated login for one issuer and subject reuses the same local identity", async () => {
+  const seen = new Map();
+  let writes = 0;
+  const db = { identity: { upsert: async ({ where }) => {
+    writes += 1;
+    const key = JSON.stringify(where.issuer_subject);
+    if (!seen.has(key)) seen.set(key, { user: { id: "same-local-id", createdAt: new Date(0) } });
+    return seen.get(key);
+  } } };
+  const session = { user: { sub: "google-oauth2|123", email: "person@example.com" } };
+  const first = await resolveLocalUser(session, "https://tenant.example/", db);
+  const second = await resolveLocalUser(session, "https://tenant.example/", db);
+  assert.equal(first.id, "same-local-id");
+  assert.equal(second.id, first.id);
+  assert.equal(writes, 2);
+});
+
 test("unauthenticated saved-analysis requests are rejected", async () => {
   const handlers = makeHandlers({ getCurrentUser: async () => null });
   const response = await handlers.listSavedHandler();
@@ -301,6 +386,130 @@ test("save ignores browser identity/result and uses the session user plus reposi
   }));
   assert.equal(response.status, 201);
   assert.deepEqual(args, ["user-a", "alice", "repo"]);
+});
+
+test("public analysis fetch logs only safe downstream status and known error text", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalError = console.error;
+  const logged = [];
+  globalThis.fetch = async (url) => url.endsWith("/identity")
+    ? Response.json({ provider: "github", provider_repo_id: "123", visibility: "public", owner_login: "alice", name: "repo" })
+    : Response.json({ error: "Internal server error" }, { status: 500 });
+  console.error = (...args) => logged.push(args);
+  try {
+    await assert.rejects(fetchPublicAnalysis("alice", "repo"), (error) => error.status === 500);
+    assert.deepEqual(logged, [["public_github_downstream_failure", {
+      path: "/api/github/repository/alice/repo/analytics",
+      status: 500,
+      message: "Internal server error",
+    }]]);
+
+    logged.length = 0;
+    globalThis.fetch = async (url) => url.endsWith("/identity")
+      ? Response.json({ provider: "github", provider_repo_id: "123", visibility: "public", owner_login: "alice", name: "repo" })
+      : Response.json({ error: "GitHub service capacity is temporarily exhausted. Try again later." }, { status: 429 });
+    await assert.rejects(
+      fetchPublicAnalysis("alice", "repo"),
+      (error) => error.status === 429 && error.message === "GitHub service capacity is temporarily exhausted. Try again later."
+    );
+    assert.deepEqual(logged, [["public_github_downstream_failure", {
+      path: "/api/github/repository/alice/repo/analytics",
+      status: 429,
+      message: "GitHub service capacity is temporarily exhausted. Try again later.",
+    }]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalError;
+  }
+});
+
+test("save persists a server-fetched snapshot and uses executeRaw for the PostgreSQL void lock", async () => {
+  const associations = new Set();
+  const lockCalls = [];
+  const analysis = {
+    repository: { name: "repo", full_name: "alice/repo", updated_at: "2026-10-01T00:00:00Z" },
+    health: { score: 87, categories: {} },
+    activity: {},
+  };
+  const tx = {
+    repository: { upsert: async () => ({ id: "repo-id" }) },
+    analysis: {
+      upsert: async ({ create }) => {
+        assert.equal(create.score, 87);
+        return { id: "analysis-id" };
+      },
+      findUnique: async () => ({ id: "analysis-id" }),
+    },
+    $executeRaw: async (strings, ...values) => {
+      lockCalls.push({ sql: strings.join("?"), values });
+    },
+    savedAnalysis: {
+      createMany: async ({ data, skipDuplicates }) => {
+        assert.equal(skipDuplicates, true);
+        const key = `${data[0].userId}:${data[0].analysisId}`;
+        if (associations.has(key)) return { count: 0 };
+        associations.add(key);
+        return { count: 1 };
+      },
+    },
+  };
+  const db = {
+    $transaction: async (callback, options) => {
+      assert.equal(options.isolationLevel, "Serializable");
+      return callback(tx);
+    },
+  };
+  const dependencies = {
+    db,
+    fetchPublicAnalysis: async (owner, repository) => {
+      assert.deepEqual([owner, repository], ["alice", "repo"]);
+      return {
+        identity: { provider_repo_id: "123", owner_login: "alice", name: "repo" },
+        analysis,
+      };
+    },
+  };
+
+  const first = await saveAnalysisForUser("user-id", "alice", "repo", dependencies);
+  const duplicate = await saveAnalysisForUser("user-id", "alice", "repo", dependencies);
+
+  assert.deepEqual(first, { analysisId: "analysis-id", alreadySaved: false });
+  assert.deepEqual(duplicate, { analysisId: "analysis-id", alreadySaved: true });
+  assert.equal(lockCalls.length, 2);
+  assert.ok(lockCalls.every(({ sql }) => sql.includes("pg_advisory_xact_lock")));
+  assert.ok(lockCalls.every(({ values }) => values[0] === "analysis-id"));
+});
+
+test("saved-analysis deletion uses executeRaw for the PostgreSQL void lock", async () => {
+  const lockCalls = [];
+  let deleted = false;
+  let counted = false;
+  const tx = {
+    $executeRaw: async (strings, ...values) => {
+      lockCalls.push({ sql: strings.join("?"), values });
+    },
+    savedAnalysis: {
+      findUnique: async ({ where }) => {
+        assert.deepEqual(where.userId_analysisId, { userId: "user-a", analysisId: "analysis-a" });
+        return { analysisId: "analysis-a" };
+      },
+      delete: async () => { deleted = true; },
+      count: async () => { counted = true; return 1; },
+    },
+    analysis: { deleteMany: async () => assert.fail("shared analysis must remain") },
+  };
+  const db = { $transaction: async (callback, options) => {
+    assert.equal(options.isolationLevel, "Serializable");
+    return callback(tx);
+  } };
+
+  assert.equal(await deleteSavedAnalysis("user-a", "analysis-a", db), true);
+  assert.equal(deleted, true);
+  assert.equal(counted, true);
+  assert.deepEqual(lockCalls, [{
+    sql: "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+    values: ["analysis-a"],
+  }]);
 });
 
 test("malformed JSON mutation bodies return a client error", async () => {
@@ -401,10 +610,11 @@ test("saved snapshot is compact and excludes raw evidence, commits, contributors
       commits: { total_commits: 42, commits_by_author: { rawAuthor: 10 }, commits_by_month: { "2026-01": 5 } },
       contributors: { total_contributors: 3, top: [{ login: "secret-user" }], total_contributions: 42 },
     },
-    evidence: { file_contents: { README: "sensitive" } },
+    evidence: { file_contents: { README: "sensitive" }, commit_history_truncated: true },
     _commits: [{ sha: "raw" }], _contributors: [{ login: "private" }], _workflow_runs: [{ name: "workflow" }],
   });
   assert.equal(snapshot.health.score, 80);
+  assert.equal(snapshot.evidence.commit_history_truncated, true);
   assert.deepEqual(snapshot.activity.commits.commits_by_month, { "2026-01": 5 });
   assert.equal(JSON.stringify(snapshot).includes("sensitive"), false);
   assert.equal(JSON.stringify(snapshot).includes("rawAuthor"), false);

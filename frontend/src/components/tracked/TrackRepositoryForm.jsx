@@ -7,17 +7,20 @@ export default function TrackRepositoryForm() {
   const [value, setValue] = useState("");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
+  const [isError, setIsError] = useState(false);
   const router = useRouter();
 
   async function submit(event) {
     event.preventDefault();
     const [owner, repository, ...extra] = value.trim().split("/");
     if (!owner || !repository || extra.length) {
+      setIsError(true);
       setMessage("Enter a repository as owner/name.");
       return;
     }
     setPending(true);
     setMessage("");
+    setIsError(false);
     try {
       const response = await fetch("/api/tracked-repositories", {
         method: "POST",
@@ -30,6 +33,7 @@ export default function TrackRepositoryForm() {
       setMessage("Repository tracked.");
       router.refresh();
     } catch (error) {
+      setIsError(true);
       setMessage(error.message || "Could not track repository.");
     } finally {
       setPending(false);
@@ -52,7 +56,7 @@ export default function TrackRepositoryForm() {
           {pending ? "Adding…" : "Track repository"}
         </button>
       </div>
-      {message ? <p role="status">{message}</p> : null}
+      {message ? <p className={isError ? "form-error" : "form-success"} role={isError ? "alert" : "status"}>{message}</p> : null}
     </form>
   );
 }

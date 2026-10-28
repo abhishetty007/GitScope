@@ -91,6 +91,9 @@ export function compactAnalysis(analysis) {
         bus_factor_80: number(activity.contributors?.bus_factor_80),
       },
     },
+    evidence: {
+      commit_history_truncated: Boolean(analysis?.evidence?.commit_history_truncated),
+    },
   };
 }
 

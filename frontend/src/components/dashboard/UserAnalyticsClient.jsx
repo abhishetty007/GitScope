@@ -20,14 +20,15 @@ export default function UserAnalyticsClient({ username, user, analytics, reposit
 
   return (
     <>
-      <UserSearchForm initialUsername={username} />
       <UserProfileCard user={user} />
       <ProfileAnalytics
         analytics={analytics}
         username={username}
         onAnalyzeRepo={openRepository}
         analyzingRepo={isPending ? analyzingRepo : ""}
+        summaryOnly
       />
+      <div className="user-search-row"><UserSearchForm initialUsername={username} /></div>
       <RepositoryGrid
         repositories={repositories}
         onAnalyzeRepo={openRepository}

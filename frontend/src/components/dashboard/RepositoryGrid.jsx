@@ -29,7 +29,7 @@ function RepositoryGrid({ repositories, onAnalyzeRepo, analyzingRepo }) {
     <section>
       <div className="repository-section-header">
         <h2 className="section-title">
-          All Repositories
+          Repositories
           <span className="count">{filteredRepositories.length}</span>
         </h2>
 
@@ -82,14 +82,14 @@ function RepositoryGrid({ repositories, onAnalyzeRepo, analyzingRepo }) {
 
             <p>Open Issues: {repo.open_issues}</p>
 
-            <button
+            <button className="button button-primary repository-analyze"
               onClick={() => onAnalyzeRepo(repo)}
               disabled={analyzingRepo !== ""}
             >
               {analyzingRepo === repo.full_name ? "Analyzing..." : "Analyze Repository"}
             </button>
 
-            <a href={repo.html_url} target="_blank" rel="noreferrer">
+            <a className="repository-secondary-link" href={repo.html_url} target="_blank" rel="noreferrer">
               View Repository
             </a>
           </div>

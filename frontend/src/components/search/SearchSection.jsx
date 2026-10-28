@@ -7,7 +7,7 @@ function SearchSection({
 }) {
   return (
     <section className="search-card">
-      <h2>Analyze a GitHub User</h2>
+      <h2>Explore a GitHub profile</h2>
 
       <div className="search-box">
         <input
@@ -23,7 +23,7 @@ function SearchSection({
           }}
         />
 
-        <button onClick={onAnalyze} disabled={loading}>
+        <button type="button" onClick={onAnalyze} disabled={loading}>
           {loading ? "Analyzing..." : "Analyze"}
         </button>
       </div>

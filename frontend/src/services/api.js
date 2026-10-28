@@ -7,6 +7,10 @@ async function handleResponse(response, defaultErrorMsg) {
   if (!response.ok) {
     const error = new Error(data.error || defaultErrorMsg);
     error.status = response.status;
+    const retryAfter = Number(response.headers.get("retry-after"));
+    if (Number.isSafeInteger(retryAfter) && retryAfter > 0) {
+      error.retryAfter = retryAfter;
+    }
     throw error;
   }
 

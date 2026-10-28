@@ -3,6 +3,13 @@ import time
 
 import requests
 from dotenv import load_dotenv
+from github_errors import (
+    GitHubRateLimitExceeded,
+    is_secondary_rate_limit_response,
+    parse_retry_after,
+)
+from rate_limit import consume_github_upstream_call
+from request_dedupe import coalesce as coalesce_inflight
 from runtime_config import bounded_integer
 
 
@@ -25,6 +32,10 @@ _MAX_FILE_FETCHES = bounded_integer(os.environ, "GITSCOPE_GITHUB_MAX_FILE_FETCHE
 class GitHubCollectionLimitError(Exception):
     """A safe hard bound was reached while collecting public GitHub data."""
 
+    def __init__(self, message, *, partial_results=None):
+        super().__init__(message)
+        self.partial_results = partial_results
+
 
 def _check_collection_deadline(started):
     if time.monotonic() - started >= _MAX_ANALYSIS_SECONDS:
@@ -37,7 +48,45 @@ def bounded_evidence_paths(important_paths, workflow_paths):
     return (important + workflows)[:_MAX_FILE_FETCHES]
 
 
+def _is_github_rate_limited(response):
+    if response.status_code == 429:
+        return True
+    if response.status_code != 403:
+        return False
+    return (
+        response.headers.get("X-RateLimit-Remaining") == "0"
+        or bool(response.headers.get("Retry-After"))
+        or is_secondary_rate_limit_response(response)
+    )
+
+
+def _github_retry_after(response, *, now=None):
+    return parse_retry_after(
+        response.headers.get("Retry-After"),
+        response.headers.get("X-RateLimit-Reset"),
+        now=now,
+    )
+
+
+def _charge_redirect(response, *args, **kwargs):
+    """Charge each redirect hop before requests follows it."""
+    if response.is_redirect:
+        consume_github_upstream_call()
+    return response
+
+
 def github_get(endpoint, params=None):
+    key_params = tuple(sorted((str(key), repr(value)) for key, value in (params or {}).items()))
+    return coalesce_inflight(
+        ("github_rest_get", endpoint, key_params),
+        lambda: _github_get_uncached(endpoint, params),
+        # The synchronous client allows one redirect hop, with a 15-second
+        # timeout per hop. Leave a small margin for request processing.
+        timeout_seconds=35,
+    )
+
+
+def _github_get_uncached(endpoint, params=None):
     url = f"{GITHUB_API_URL}{endpoint}"
 
     headers = {
@@ -48,12 +97,19 @@ def github_get(endpoint, params=None):
     if GITHUB_TOKEN:
         headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
-    response = requests.get(
-        url,
-        params=params,
-        headers=headers,
-        timeout=15
-    )
+    consume_github_upstream_call()
+    with requests.Session() as session:
+        session.max_redirects = 1
+        response = session.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=15,
+            hooks={"response": [_charge_redirect]},
+        )
+
+    if _is_github_rate_limited(response):
+        raise GitHubRateLimitExceeded(_github_retry_after(response))
 
     if response.status_code == 404:
         return None

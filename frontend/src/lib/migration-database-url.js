@@ -15,7 +15,10 @@ export function getMigrationDatabaseUrl(env = process.env) {
     if (!["postgres:", "postgresql:"].includes(parsedUrl.protocol)) {
       throw new Error("Production migration database URL is invalid");
     }
-    if (!["require", "verify-ca", "verify-full"].includes(parsedUrl.searchParams.get("sslmode"))) {
+    const sslmodeValues = Array.from(parsedUrl.searchParams.entries())
+      .filter(([name]) => name.toLowerCase() === "sslmode")
+      .map(([, value]) => value.toLowerCase());
+    if (sslmodeValues.length !== 1 || !["require", "verify-ca", "verify-full"].includes(sslmodeValues[0])) {
       throw new Error("Production migration database URL must enforce TLS");
     }
     return url;

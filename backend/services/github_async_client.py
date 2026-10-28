@@ -47,6 +47,13 @@ import os
 import sys
 
 import httpx
+from github_errors import (
+    GitHubRateLimitExceeded,
+    GitHubUpstreamBudgetExceeded,
+    is_secondary_rate_limit_response,
+    parse_retry_after,
+)
+from rate_limit import RateLimitStoreUnavailable, consume_github_upstream_call
 from dotenv import load_dotenv
 
 # Ensure the backend root is importable when tests run from any cwd
@@ -116,22 +123,28 @@ def _is_rate_limited(response: httpx.Response) -> bool:
 
     # Secondary rate limits are reported with a Retry-After hint and
     # may leave the primary remaining count untouched.
-    if response.headers.get("Retry-After"):
+    if response.headers.get("Retry-After") or is_secondary_rate_limit_response(response):
         return True
 
     return False
 
 
-def _check_rate_limit(response: httpx.Response, url: str) -> None:
+def _check_rate_limit(response: httpx.Response, url: str, *, now=None) -> None:
     if not _is_rate_limited(response):
         return
 
-    remaining = response.headers.get("X-RateLimit-Remaining", "?")
-    reset = response.headers.get("X-RateLimit-Reset", "?")
-    raise RuntimeError(
-        f"GitHub rate limit hit on {url}. "
-        f"Remaining={remaining}, Reset={reset}"
+    retry_seconds = parse_retry_after(
+        response.headers.get("Retry-After"),
+        response.headers.get("X-RateLimit-Reset"),
+        now=now,
     )
+    raise GitHubRateLimitExceeded(retry_seconds)
+
+
+async def _charge_redirect_async(response: httpx.Response) -> None:
+    """Charge a redirect response before httpx follows the next request."""
+    if response.is_redirect:
+        consume_github_upstream_call()
 
 
 # -----------------------------------------------------------------
@@ -154,6 +167,7 @@ async def _async_get(
     """
 
     url = f"{GITHUB_API_URL}{endpoint}"
+    consume_github_upstream_call()
     response = await client.get(url, params=params or {})
     _check_rate_limit(response, url)
 
@@ -190,7 +204,10 @@ async def _async_get_all_pages(
         results.extend(page_data)
         if len(page_data) < per_page:
             return results
-    raise GitHubCollectionLimitError("GitHub collection page limit reached")
+    raise GitHubCollectionLimitError(
+        "GitHub collection page limit reached",
+        partial_results=results,
+    )
 
 
 # -----------------------------------------------------------------
@@ -219,6 +236,8 @@ async def _fetch_file(
             f"/repos/{owner}/{repository}/contents/{path}",
             params={"ref": branch},
         )
+    except (GitHubRateLimitExceeded, GitHubUpstreamBudgetExceeded, RateLimitStoreUnavailable):
+        raise
     except Exception:
         return path, None
 
@@ -257,6 +276,8 @@ async def _collect_evidence_async_impl(owner: str, repository: str) -> dict | No
         headers=headers,
         timeout=_TIMEOUT,
         follow_redirects=True,
+        max_redirects=1,
+        event_hooks={"response": [_charge_redirect_async]},
     ) as client:
         # ----------------------------------------------------------
         # Stage 1: repository metadata (sequential)
@@ -353,14 +374,27 @@ async def _collect_evidence_async_impl(owner: str, repository: str) -> dict | No
 
         async def fetch_commits():
             if cached_commits is not None:
-                return cached_commits
-            result = await _async_get_all_pages(
-                client,
-                f"/repos/{owner}/{repository}/commits",
-            )
-            commits = result or []
-            _cache.set_raw(commits_cache_key, commits)
-            return commits
+                if isinstance(cached_commits, dict) and "items" in cached_commits:
+                    return cached_commits
+                return {"items": cached_commits, "truncated": False}
+
+            try:
+                result = await _async_get_all_pages(
+                    client,
+                    f"/repos/{owner}/{repository}/commits",
+                )
+                collected = {"items": result or [], "truncated": False}
+            except GitHubCollectionLimitError as error:
+                # GitHub returns newest commits first. Keep this bounded
+                # sample for activity analysis, and mark it as incomplete
+                # instead of failing the entire public analysis.
+                collected = {
+                    "items": error.partial_results or [],
+                    "truncated": True,
+                }
+
+            _cache.set_raw(commits_cache_key, collected)
+            return collected
 
         async def fetch_contributors():
             if cached_contributors is not None:
@@ -413,6 +447,10 @@ async def _collect_evidence_async_impl(owner: str, repository: str) -> dict | No
         ]
         results = await asyncio.gather(*all_tasks, return_exceptions=True)
 
+        for result in results:
+            if isinstance(result, (GitHubRateLimitExceeded, GitHubUpstreamBudgetExceeded, RateLimitStoreUnavailable)):
+                raise result
+
         # Separate file results from the repository-level tasks
         n_files = len(file_tasks)
         file_results = results[:n_files]
@@ -439,7 +477,8 @@ async def _collect_evidence_async_impl(owner: str, repository: str) -> dict | No
                 file_contents[path] = content
 
         # Normalise commits/contributors (exceptions → empty list)
-        commits = commits_result if isinstance(commits_result, list) else []
+        commits = commits_result.get("items", []) if isinstance(commits_result, dict) else []
+        commits_truncated = bool(commits_result.get("truncated", False)) if isinstance(commits_result, dict) else False
         contributors = contributors_result if isinstance(contributors_result, list) else []
         workflow_runs = (
             workflow_runs_result
@@ -513,6 +552,7 @@ async def _collect_evidence_async_impl(owner: str, repository: str) -> dict | No
         # Include raw commits/contributors/runs so app.py can reuse
         # them without additional network calls.
         "_commits": commits,
+        "_commits_truncated": commits_truncated,
         "_contributors": contributors,
         "_workflow_runs": workflow_runs,
     }
