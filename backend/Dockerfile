@@ -7,7 +7,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN groupadd --system --gid 10001 gitscope \
-    && useradd --system --uid 10001 --gid gitscope --home-dir /app gitscope
+    && useradd --system --uid 10001 --gid gitscope --home-dir /app gitscope \
+    && chown gitscope:gitscope /app
 
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --requirement requirements.txt
