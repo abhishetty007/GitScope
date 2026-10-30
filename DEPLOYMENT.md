@@ -1,13 +1,14 @@
 # GitScope beta deployment checklist
 
 This guide describes the current Next.js, Flask, PostgreSQL, Auth0, and GitHub
-deployment shape. It contains variable names and purposes only. Enter secret
+deployment shape. It contains variable names and purposes only; it does not
+configure provider dashboards or certify their current state. Enter secret
 values in provider dashboards, never in Git, Docker build arguments, or build
-logs. No provider account or deployment has been configured or verified here.
+logs.
 
 ## Free hosting assessment
 
-The documented combination is Vercel for Next.js, Render for Flask, Neon for
+The documented combination is Vercel for Next.js, Render for Flask, Supabase for
 PostgreSQL, and Auth0 for sign-in. Default provider subdomains are available;
 Vercel assigns a `vercel.app` address and Render assigns an `onrender.com`
 address, both with provider-managed HTTPS.
@@ -23,7 +24,7 @@ availability limits:
   Free services. Outbound bandwidth and build-pipeline usage have workspace
   allowances; check the dashboard because high service-initiated public traffic
   can also suspend a Free web service.
-  Use Neon for the database, not Render's free database. Review Render's
+  Use the existing Supabase PostgreSQL project, not Render's free database. Review Render's
   [current free-instance limits](https://render.com/docs/free) before inviting
   testers.
 - Vercel Hobby is free, but limited to non-commercial personal use. Current
@@ -37,12 +38,11 @@ availability limits:
   fit the beta before deployment in the [Hobby plan](https://vercel.com/docs/plans/hobby),
   [function limits](https://vercel.com/docs/functions/limitations), and
   [Fluid Compute settings](https://vercel.com/docs/fluid-compute).
-- As of 2026-10-25, Neon's Free plan advertises 1 GB storage per project, 100
-  CU-hours per project per month, autoscaling up to 2 CU, and a 6-hour
-  instant-restore window. Compute may scale to zero. Check the account dashboard
-  for current quotas and recovery options; the restore window is not a verified
-  backup or disaster-recovery configuration. See [Neon's current Free plan
-  details](https://neon.com/blog/neon-free-plan-1-gb-per-project).
+- Supabase Free currently includes a 500 MB database and may pause projects
+  after a week of low activity. Downloadable database backups are not included
+  on Free; export and keep an off-site backup before treating beta data as
+  durable. Check [current Supabase plan details](https://supabase.com/pricing)
+  and [backup guidance](https://supabase.com/docs/guides/platform/backups).
 - Auth0's pricing page currently lists a Free plan up to 25,000 monthly active
   users. Check the tenant's applicable features and quota in the
   [Auth0 dashboard](https://auth0.com/pricing).
@@ -68,23 +68,19 @@ audit.
 
 ### 1. Prepare the PostgreSQL database
 
-- Create a persistent PostgreSQL project in Neon. Select a region close to the
-  application services where possible.
-- Create a restricted runtime role for the frontend Prisma client and use it
-  for `DATABASE_URL`. Create a separate migration-owner role for `DIRECT_URL`;
-  provide that URL only to the controlled migration step. Do not run the web
-  application as the migration owner.
-- Apply the checked-in Prisma migrations once, from the `frontend` directory,
-  with `DIRECT_URL` set to the migration-owner connection:
-  `npm run db:migrate:deploy`.
-- Create a separate `gitscope_rate_limiter` login with access only to the shared
-  rate-limit table. Follow the SQL grants and verification queries in
-  [frontend/README.md](frontend/README.md#distributed-github-api-rate-limiting).
-- Use TLS for both the application and limiter database URLs. Never give the
+- Use the existing Supabase PostgreSQL project and its restricted application
+  roles. `DATABASE_URL` belongs to `gitscope_frontend`; the backend limiter uses
+  `gitscope_rate_limiter`; controlled Prisma commands use `DIRECT_URL` for
+  `gitscope_migrator`.
+- The existing public tables already match the two checked-in Prisma
+  migrations, but `_prisma_migrations` is absent. Do not run
+  `prisma migrate deploy` against this database. Follow the read-only status
+  and schema-diff checks and the two-migration baseline procedure below first.
+- Use TLS for application, limiter, and migration connections. Never give the
   limiter role schema creation, table creation, or application-data access.
 - Verify effective grants, role membership, TLS connectivity, available
-  connections, and recovery settings in the Neon console. These account-side
-  checks have not been performed.
+  connections, and backup/export recovery in Supabase before treating beta data
+  as durable.
 
 ### 2. Deploy the Flask API
 
@@ -174,7 +170,7 @@ unlimited API access. See [GitHub's REST rate-limit documentation](https://docs.
 - Verify Auth0 login, callback, logout, saved-analysis ownership, and tracked
   repository ownership with a test account.
 - Confirm the GitHub quota from live rate-limit headers, global request limits,
-  Neon usage, provider logs, database recovery, and provider usage controls.
+  Supabase usage, provider logs, database recovery, and provider usage controls.
 - Do not treat the successful local build or unit tests as evidence that
   provider networking, TLS, Auth0 callbacks, database grants, or cross-instance
   rate limiting work.
@@ -226,7 +222,7 @@ validation. `GUNICORN_TIMEOUT`, `GUNICORN_GRACEFUL_TIMEOUT`, and `PORT` are
 container/platform settings; they do not replace the application-level GitHub
 collection deadline. The repository does not define a separate Prisma runtime
 role grant script, so provision and verify the `DATABASE_URL` role's required
-application-table permissions in Neon. Keep migration-owner credentials in the
+application-table permissions in Supabase. Keep migration-owner credentials in the
 one-off migration environment, not the long-running Vercel app.
 
 ## Repository entry points and deployment contract
@@ -271,36 +267,82 @@ against the provider's real connection allowance and the maximum number of
 instances/processes; do not multiply the per-process pool value by one and
 assume it is the total.
 
-For a staging migration:
+For the existing Supabase database, reconcile Prisma history before any
+schema-changing migration. Supabase's
+`supabase_migrations.schema_migrations` ledger and Prisma's
+`public._prisma_migrations` table track different tools and are not
+interchangeable. The two Prisma SQL files remain the source of truth for the
+schema. The first two Supabase migration files are byte-for-byte copies of
+those Prisma SQL files, named to match the existing Supabase ledger entries;
+keep each copy synchronized with its Prisma source. The two Supabase security
+SQL files mirror changes already recorded in the Supabase ledger.
 
-1. Create a staging database that is separate from production and the primary
-   development database. Confirm the host, database, schema, TLS mode, and role
-   before running any command. Capture a recoverable provider backup/branch or
-   otherwise verify a restore path first.
-2. From `frontend`, run `npx prisma migrate status` to inspect migration state,
-   then run `npm run db:migrate:deploy` against the staging database as the
-   migration owner. Set `DIRECT_URL` to the migration-owner URL in the
-   controlled migration environment. Although the config can fall back to
-   `DATABASE_URL`, do not use the runtime role for staging migrations. Use a
-   direct/session migration connection where required by the provider. Never
-   use the restricted limiter role and never use
-   `prisma db push`. If tables already exist without matching Prisma migration
-   history, stop: the initial migration creates tables and there is no repository
-   baselining procedure. Snapshot and reconcile the schema/history before
-   applying any pending migration.
-3. For a fresh staging database, the checked-in migrations create the
-   application schema (`20261006000000_phase5_initial`) and then add the shared
-   limiter table/index (`20261014000000_shared_rate_limit`). Review the SQL and
-   migration status before and after applying them. The repo's Compose
-   migration service is a one-off Docker target; Vercel app startup does not
-   run migrations.
-4. After the limiter table exists, apply and verify the restricted-role grants
-   from the [frontend database setup](frontend/README.md#distributed-github-api-rate-limiting).
-   Point the backend only at that restricted login. Verify effective grants
-   and the SSL connection without printing connection strings.
-5. Exercise staging, then perform the four PostgreSQL integration tests below
-   against a separate test database. Do not run them against production or the
-   primary development database.
+From `frontend`, after a recoverable export/restore path is confirmed and with
+`DIRECT_URL` securely set to the controlled migration role, run these commands
+only as a reviewed reconciliation step:
+
+```powershell
+npx prisma migrate status --config ./prisma.config.ts
+npx prisma migrate diff --from-config-datasource --to-schema ./prisma/schema.prisma --script --config ./prisma.config.ts
+```
+
+Review the status and generated SQL before baselining. Prisma's schema does not
+represent the SQL-only `request_count > 0` check, so separately verify that
+constraint from PostgreSQL's catalog before deciding the schema matches:
+
+```sql
+SELECT conname, pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'public.gitscope_rate_limit_windows'::regclass
+  AND conname = 'gitscope_rate_limit_windows_count_positive';
+```
+
+If the live schema matches both checked-in migrations, resolve only those two
+migrations as already applied, then check the status again:
+
+```powershell
+npx prisma migrate resolve --applied 20261006000000_phase5_initial --config ./prisma.config.ts
+npx prisma migrate resolve --applied 20261014000000_shared_rate_limit --config ./prisma.config.ts
+npx prisma migrate status --config ./prisma.config.ts
+```
+
+`migrate resolve --applied` writes Prisma migration-history metadata and does
+not execute either migration SQL file. Do not resolve the Supabase-only
+security migrations with Prisma, do not edit the Supabase migration ledger as
+part of this baseline, and do not run `migrate deploy` until a separate
+schema-owner plan is approved. The commands above are prepared for the next
+database phase and have not been run.
+
+The baseline role is `gitscope_migrator`. It is non-superuser, has no
+`BYPASSRLS`, and can create in `public`, but the existing seven Prisma-managed
+tables are owned by `postgres`; baseline resolution does not transfer that
+ownership. It is suitable for recording migration history, but it cannot
+perform future `ALTER TABLE` operations on those relations. Before any future
+schema-changing migration, test a specific handoff plan on an isolated copy:
+transfer only `users`, `identities`, `repositories`, `analyses`,
+`saved_analyses`, `tracked_repositories`, and `gitscope_rate_limit_windows` to
+`gitscope_migrator`, verify all runtime grants and object ownership afterward,
+and keep the migration role non-superuser and non-bypassrls. Do not transfer
+ownership or broaden role membership as part of baseline reconciliation.
+
+The live default-privilege catalog shows public-schema grants to `anon` and
+`authenticated` for future tables, sequences, and functions created by
+`postgres` and `supabase_admin`; the `gitscope_migrator` role has no matching
+custom defaults. The existing table `REVOKE` migration only affects current
+tables. Create future GitScope schema objects as `gitscope_migrator`, not as
+`postgres` or `supabase_admin`. No public routines are part of the Prisma
+schema; any future public function must revoke `EXECUTE` from `PUBLIC`, `anon`,
+and `authenticated` explicitly and grant only its intended callers. The
+current database operator cannot alter `supabase_admin` defaults because it is
+not a member of that role; do not add role membership to bypass this boundary.
+Review Supabase platform-owned defaults separately before changing them.
+
+For a fresh isolated database, apply the checked-in Prisma migrations in order
+with a controlled role that has `USAGE` and `CREATE` on the target schema and
+will own the objects it creates. The existing Supabase production database is
+not a fresh target. The Compose migration service is a one-off Docker target;
+Vercel app startup does not run migrations. Perform the four PostgreSQL
+integration tests below only against a separate migrated test database.
 
 The shared-rate-limit migration is additive: it creates one counter table, a
 positive-count check, and an index; it does not rewrite application rows. The
@@ -311,8 +353,9 @@ associated saved/tracked/analysis rows. No down migrations are checked in, and
 app artifact does not reverse a database migration. Keep the additive counter
 table in place during app rollback; use a verified provider restore/backup only
 for an actual database recovery, with the expected data-loss window understood.
-The Neon instant-restore window described above is not proof that a backup or
-restore procedure has been configured or tested.
+The Supabase Free plan does not include downloadable managed database backups;
+export data and verify an off-site restore process before treating beta data as
+durable.
 
 ## Isolated PostgreSQL integration tests
 
@@ -372,7 +415,7 @@ development URL.
   Confirm current service settings and runtime environment values as part of a
   rollback. See [Vercel rollback limits](https://vercel.com/docs/cli/rollback)
   and [Render rollback behavior](https://render.com/docs/rollbacks). A code
-  rollback does not roll back Neon migrations; keep database recovery separate
+  rollback does not roll back Supabase/PostgreSQL migrations; keep database recovery separate
   and verify the provider's restore/backup option before staging data is
   treated as durable.
 
@@ -397,7 +440,7 @@ development URL.
 - Complete keyboard, screen-reader, focus, contrast, zoom, and reduced-motion
   accessibility review on the actual staging site.
 - After stable staging URLs exist, verify Auth0 login/callback/logout and
-  ownership flows, Vercel-to-Render HTTPS connectivity, Neon TLS and effective
+  ownership flows, Vercel-to-Render HTTPS connectivity, Supabase TLS and effective
   grants, the live GitHub quota and chosen bounded budget, analytics under
   rate-limit conditions, cross-instance shared limiting, limiter-outage
   recovery, cold-start/timeout behavior, provider usage controls, and the

@@ -14,7 +14,7 @@ ENV GITSCOPE_SITE_URL=${GITSCOPE_SITE_URL}
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
 
-# Prisma 7 reads datasource configuration from prisma7.config.ts. Generation
+# Prisma 7 reads datasource configuration from prisma.config.ts. Generation
 # uses its build-time fallback URL and does not connect to a database.
 RUN npm run db:generate
 RUN npm run build
@@ -24,7 +24,7 @@ RUN npm run build
 FROM dependencies AS migrator
 WORKDIR /app
 COPY prisma ./prisma
-COPY prisma7.config.ts ./prisma7.config.ts
+COPY prisma.config.ts ./prisma.config.ts
 COPY src/lib/migration-database-url.js ./src/lib/migration-database-url.js
 CMD ["npm", "run", "db:migrate:deploy"]
 

@@ -10,12 +10,12 @@
     "lint": "oxlint app src",
     "test": "node --conditions=react-server --test",
     "preview": "node start-standalone.mjs",
-    "db:generate": "prisma generate",
-    "db:validate": "prisma validate",
-    "db:migrate:dev": "prisma migrate dev",
-    "db:migrate:deploy": "prisma migrate deploy",
-    "predev": "prisma generate",
-    "prebuild": "prisma generate"
+    "db:generate": "prisma generate --config ./prisma.config.ts",
+    "db:validate": "prisma validate --config ./prisma.config.ts",
+    "db:migrate:dev": "prisma migrate dev --config ./prisma.config.ts",
+    "db:migrate:deploy": "prisma migrate deploy --config ./prisma.config.ts",
+    "predev": "npm run db:generate",
+    "prebuild": "npm run db:generate"
   },
   "dependencies": {
     "@auth0/nextjs-auth0": "^4.31.0",

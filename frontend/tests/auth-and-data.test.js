@@ -235,6 +235,33 @@ test("frontend Docker default stage is runner and migrator remains an explicit t
   assert.match(productionCompose, /migrator:[\s\S]*?target: migrator/);
 });
 
+test("all Prisma CLI entry points use the standard Prisma 7 config", async () => {
+  const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+  const dockerfile = await readFile(path.join(root, "Dockerfile"), "utf8");
+  const ci = await readFile(path.resolve(root, "..", ".github", "workflows", "ci.yml"), "utf8");
+  const deployment = await readFile(path.resolve(root, "..", "DEPLOYMENT.md"), "utf8");
+  const readme = await readFile(path.join(root, "README.md"), "utf8");
+  const config = await readFile(path.join(root, "prisma.config.ts"), "utf8");
+
+  for (const scriptName of ["db:generate", "db:validate", "db:migrate:dev", "db:migrate:deploy"]) {
+    assert.match(packageJson.scripts[scriptName], /--config \.\/prisma\.config\.ts/);
+  }
+  assert.equal(packageJson.scripts.predev, "npm run db:generate");
+  assert.equal(packageJson.scripts.prebuild, "npm run db:generate");
+  assert.match(config, /defineConfig/);
+  assert.match(dockerfile, /COPY prisma\.config\.ts \.\/prisma\.config\.ts/);
+  assert.doesNotMatch(dockerfile, /prisma7\.config\.ts/);
+  assert.match(ci, /npm run db:generate/);
+  assert.match(ci, /npm run db:migrate:deploy/);
+  for (const invocation of deployment.match(/^npx prisma .*$/gm) ?? []) {
+    assert.match(invocation, /--config \.\/prisma\.config\.ts/);
+  }
+  for (const invocation of readme.match(/^npx prisma .*$/gm) ?? []) {
+    assert.match(invocation, /--config \.\/prisma\.config\.ts/);
+  }
+  assert.doesNotMatch(deployment, /prisma7\.config\.ts/);
+});
+
 test("production npm entrypoint loads runtime env before starting the standalone server", async () => {
   const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
   const launcher = await readFile(path.join(root, "start-standalone.mjs"), "utf8");
@@ -304,7 +331,7 @@ test("production migration image has Prisma files and receives no build-time DB 
   const productionCompose = await readFile(path.resolve(root, "..", "compose.production.yaml"), "utf8");
   assert.match(dockerfile, /FROM dependencies AS migrator/);
   assert.match(dockerfile, /COPY prisma \.\/prisma/);
-  assert.match(dockerfile, /COPY prisma7\.config\.ts/);
+  assert.match(dockerfile, /COPY prisma\.config\.ts/);
   assert.match(dockerfile, /COPY src\/lib\/migration-database-url\.js/);
   assert.match(dockerfile, /CMD \["npm", "run", "db:migrate:deploy"\]/);
   assert.doesNotMatch(dockerfile, /ARG\s+(?:DATABASE_URL|DIRECT_URL)/);

@@ -68,10 +68,11 @@ instances enforce the same service-wide windows. These calls originate from
 Next.js server code on Vercel, so Render sees Vercel's outbound connection IP,
 not the browser user. We deliberately use an aggregate service budget instead
 of inventing per-user identity from forwarding headers. The limiter uses the
-Neon/PostgreSQL database already required by the application; it adds no Redis
+Supabase/PostgreSQL database already required by the application; it adds no Redis
 or paid runtime service. It does add a small transactional database write for
 each guarded request. The PostgreSQL pool allows at most two connections per
-backend worker; size `GUNICORN_WORKERS` and Render instances against Neon limits.
+backend worker; size `GUNICORN_WORKERS` and Render instances against Supabase
+connection and usage limits.
 
 | Operation | Inbound limit | SDK requests / maximum wire requests per request |
 | --- | ---: | ---: |
@@ -83,14 +84,17 @@ backend worker; size `GUNICORN_WORKERS` and Render instances against Neon limits
 | Repository detail or identity | Shared 60/min metadata bucket | 1 / 2 |
 | Repository commits or contributors | Shared 60/min metadata bucket | 11 / 22 each |
 
-Local Compose passes its PostgreSQL URL to Flask. For Render + Neon:
+Local Compose passes its PostgreSQL URL to Flask. For Render + Supabase:
 
-1. Deploy the additive Prisma migration with the application database owner
-   before deploying the backend code.
-2. In Neon, create a separate login role named `gitscope_rate_limiter` and set
-   its generated password in the Neon console. As the database owner, grant it
+1. For a fresh database, apply the required Prisma migrations before deploying
+   the backend code. For the existing Supabase database, first follow the
+   status, schema-diff, and baseline procedure in the root deployment guide;
+   do not replay initial migrations against existing tables.
+2. In Supabase, create or use the separate login role named
+   `gitscope_rate_limiter` through an authorized database administration
+   session. As the database owner, grant it
    only the permissions needed for the counter table (replace the database
-   identifier if your Neon database has a different name):
+   identifier if the Supabase database has a different name):
 
    ```sql
    GRANT CONNECT ON DATABASE gitscope TO gitscope_rate_limiter;
@@ -115,7 +119,7 @@ Local Compose passes its PostgreSQL URL to Flask. For Render + Neon:
    ```
 
    The first six results should be true and `can_truncate` false. Also inspect
-   Neon role membership/attributes and confirm the role is not a table owner,
+   Supabase role membership/attributes and confirm the role is not a table owner,
    superuser, or member of an application-owner role. Do not grant sequences,
    schema creation, table creation, or TRUNCATE; this migration has no sequence.
    The following owner-side queries expose those attributes and inherited role
@@ -138,7 +142,7 @@ Local Compose passes its PostgreSQL URL to Flask. For Render + Neon:
    ```
 3. Set these Render backend environment variables (values are supplied in the
    provider dashboard and are never committed):
-   - `GITSCOPE_RATE_LIMIT_DATABASE_URL`: Neon pooled PostgreSQL URL for the
+   - `GITSCOPE_RATE_LIMIT_DATABASE_URL`: Supabase pooled PostgreSQL URL for the
      restricted role, with `sslmode=require` or stronger. PgBouncer transaction
      pooling is supported; the client disables server-side prepared statements.
    - `GITSCOPE_GITHUB_METADATA_GLOBAL_LIMIT_PER_MINUTE` is an optional integer
@@ -202,17 +206,18 @@ Vercel's firewall can additionally limit requests that reach the Vercel app,
 but it does not protect a separately reachable Render API origin from direct
 calls. Vercel's WAF rate limiting has included request volume and then usage
 pricing; it is supplementary and not required for the PostgreSQL mechanism.
-Render's DDoS mitigation is not an application quota limiter. Neon free-tier
+Render's DDoS mitigation is not an application quota limiter. Supabase Free
 capacity and account quota are account-specific and must be checked in the
 owner's console; this design uses the existing database but does not guarantee
 that a free plan has enough compute/connections for production traffic.
 
 For a staging verification pass, keep the following separate from production:
 
-1. Deploy only the additive `20261014000000_shared_rate_limit` migration using
-   the normal migration-owner URL (`cd frontend; npm run db:migrate:deploy`).
-   Do not run it as the restricted limiter role.
-2. Connect with the restricted role through the Neon pooled URL and verify the
+1. For a fresh database only, apply the additive
+   `20261014000000_shared_rate_limit` Prisma migration with the migration owner.
+   For the existing Supabase database, do not run `migrate deploy` until the
+   root guide's reconciliation and owner checks are complete.
+2. Connect with the restricted role through the Supabase pooled URL and verify the
    TLS connection using the `psql` connection-info command; confirm the displayed connection
    is SSL. The runtime also rejects missing, duplicate, unsupported, or
    non-TLS `sslmode` values before the pool opens.
@@ -229,7 +234,7 @@ For a staging verification pass, keep the following separate from production:
    confirm a guarded route returns generic 503 with `Retry-After: 5` without
    issuing GitHub traffic; restore the URL and verify recovery after restart.
 
-Migration state, effective Neon role grants, a real pooled TLS handshake,
+Migration state, effective Supabase role grants, a real pooled TLS handshake,
 cross-instance behavior, and outage/recovery remain unverified until these
 staging checks are performed. Do not interpret local tests as evidence for
 those provider-managed settings.
@@ -267,16 +272,21 @@ Next.js host; static-only hosting is not sufficient. Configure the Flask API's
 production CORS policy to remain empty; the browser does not call Flask
 directly.
 
-Run `prisma migrate deploy` once as a controlled release step before deploying
-the new app version. With Compose, use
+For a fresh database, run
+`npx prisma migrate deploy --config ./prisma.config.ts` as a controlled release
+step before deploying the new app version. For the existing Supabase database,
+first follow the status, schema-diff, and baseline procedure in the root
+deployment guide; do not deploy the initial migrations to existing tables.
+With Compose, use
 `docker compose -f compose.yaml -f compose.production.yaml run --rm migrator`;
 the `release`-profile migration service is a one-off task and is never started
 by the web service. The migration image contains the Prisma CLI, config, schema,
 and checked-in migrations, and receives database credentials only at runtime.
-Set optional `DIRECT_URL` only when the provider uses a separate direct/session
-endpoint for migrations; otherwise migrations use `DATABASE_URL`. Both
-production URLs must enforce TLS. Never run `prisma db push` or migrations from
-application startup.
+Set `DIRECT_URL` to the separate `gitscope_migrator` TLS connection for every
+staging or production migration step; do not provide it to the web runtime.
+Local development may fall back to `DATABASE_URL`. Production database URLs
+must enforce TLS. Never run `prisma db push` or migrations from application
+startup.
 
 Automated backups and point-in-time recovery belong to the managed PostgreSQL
 provider, not application code. Set retention and recovery objectives with the
